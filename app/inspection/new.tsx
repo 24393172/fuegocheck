@@ -81,7 +81,7 @@ export default function NewInspectionScreen() {
           value={clientName}
           onChangeText={setClientName}
           placeholder="Nombre del cliente o empresa"
-          placeholderTextColor="#9ca3af"
+          placeholderTextColor="#6b7280"
           autoCapitalize="words"
         />
       </View>
@@ -93,7 +93,7 @@ export default function NewInspectionScreen() {
           value={location}
           onChangeText={setLocation}
           placeholder="Dirección o descripción del lugar"
-          placeholderTextColor="#9ca3af"
+          placeholderTextColor="#6b7280"
           autoCapitalize="sentences"
         />
       </View>

@@ -14,6 +14,17 @@ export interface Inspection {
   sent_at: number | null;
 }
 
+// Lightweight row for list screens (dashboard, history). Excludes the heavy
+// form_data JSON blob — use getInspection(id) when the full record is needed.
+export interface InspectionListItem {
+  id: string;
+  technician_name: string;
+  client_name: string;
+  location: string;
+  status: InspectionStatus;
+  created_at: number;
+}
+
 export interface Photo {
   id: string;
   inspection_id: string;

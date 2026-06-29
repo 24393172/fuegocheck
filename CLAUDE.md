@@ -218,7 +218,10 @@ delete the inspection.
 - Body: HTML table with all form fields
 - Marked `sent` right before the composer opens (Android doesn't report send status).
   If the user cancels, they can re-send from the same screen.
-- Temp files (Excel + signature PNGs) are deleted after the composer opens; photos stay.
+- Generated files (Excel + signature PNGs) PERSIST after the composer opens — Gmail
+  re-reads them in the background when actually sending; deleting them early strands
+  the email in drafts. They are removed on inspection delete and pruned at app
+  startup after 3 days (lib/attachment-files.ts).
 - No offline queue — sharing is manual, the technician taps Send.
 - Deleting an inspection uses `deleteInspectionCompletely()` — removes photo rows,
   signature rows, the inspection row, and the physical photo files.

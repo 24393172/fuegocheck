@@ -1,6 +1,0 @@
-{
-  "name": "react-native-worklets",
-  "version": "0.5.1",
-  "description": "Stub — react-native-css-interop/babel.js unconditionally references this but we do not use Reanimated 4 worklets.",
-  "main": "index.js"
-}

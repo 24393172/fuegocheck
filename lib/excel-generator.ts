@@ -1,8 +1,12 @@
-import * as XLSX from 'xlsx';
+// xlsx is heavy (hundreds of KB). It is imported lazily inside each generate
+// function so it loads on first export instead of slowing down app startup.
+// `import type` is erased at compile time and does NOT bundle the module.
+import type * as XLSXType from 'xlsx';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getInspection, getAllInspections } from './repositories/inspections.repo';
 import { getSchema, pumpFormV2 } from '../schemas';
-import { Inspection, InspectionStatus } from '../types/inspection.types';
+import { InspectionStatus } from '../types/inspection.types';
+import { parseFormData } from './form-data';
 
 function yesNoNaLabel(value: unknown): string {
   if (value === 'si') return 'Sí';
@@ -29,17 +33,11 @@ function cellValue(type: string, value: unknown): string | number {
   return String(value);
 }
 
-// Parses form_data defensively — a corrupted record returns {} instead of crashing.
-function parseFormData(inspection: Inspection): Record<string, unknown> {
-  try {
-    return JSON.parse(inspection.form_data) as Record<string, unknown>;
-  } catch (error) {
-    console.error(`[excel] Corrupted form_data for inspection ${inspection.id}:`, error);
-    return {};
-  }
-}
-
-function writeWorkbook(wb: XLSX.WorkBook, fileName: string): Promise<string> {
+function writeWorkbook(
+  XLSX: typeof XLSXType,
+  wb: XLSXType.WorkBook,
+  fileName: string
+): Promise<string> {
   const base64 = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' }) as string;
   const filePath = `${FileSystem.documentDirectory}${fileName}`;
   return FileSystem.writeAsStringAsync(filePath, base64, {
@@ -50,6 +48,7 @@ function writeWorkbook(wb: XLSX.WorkBook, fileName: string): Promise<string> {
 // ─── Single inspection (vertical layout: one row per field) ────────────────────
 
 export async function generateInspectionExcel(inspectionId: string): Promise<string> {
+  const XLSX = await import('xlsx');
   const inspection = await getInspection(inspectionId);
   if (!inspection) throw new Error(`Inspection ${inspectionId} not found`);
 
@@ -63,7 +62,7 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
   rows.push([schema.name]);
   rows.push([]);
 
-  const date = String(formData['fecha'] ?? formData['inspection_date'] ?? '');
+  const date = String(formData['fecha'] ?? '');
 
   rows.push(['Cliente', inspection.client_name]);
   rows.push(['Fecha', date]);
@@ -95,13 +94,14 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
 
   const safeClient = inspection.client_name.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 20);
   const fileName = `inspeccion_${safeClient}_${inspectionId.slice(0, 8)}.xlsx`;
-  return writeWorkbook(wb, fileName);
+  return writeWorkbook(XLSX, wb, fileName);
 }
 
 // ─── All inspections (master sheet: one row per inspection) ────────────────────
 // Used by the "Exportar todo" button in Settings so the company can consolidate.
 
 export async function generateMasterExcel(): Promise<{ filePath: string; count: number }> {
+  const XLSX = await import('xlsx');
   const inspections = await getAllInspections();
 
   // Columns: fixed metadata + every non-media field of the pump form.
@@ -114,7 +114,7 @@ export async function generateMasterExcel(): Promise<{ filePath: string; count: 
 
   for (const insp of inspections) {
     const formData = parseFormData(insp);
-    const date = String(formData['fecha'] ?? formData['inspection_date'] ?? '');
+    const date = String(formData['fecha'] ?? '');
     const row: (string | number)[] = [
       date,
       insp.client_name,
@@ -139,6 +139,6 @@ export async function generateMasterExcel(): Promise<{ filePath: string; count: 
   XLSX.utils.book_append_sheet(wb, ws, 'Inspecciones');
 
   const stamp = new Date().toISOString().slice(0, 10);
-  const filePath = await writeWorkbook(wb, `inspecciones_${stamp}.xlsx`);
+  const filePath = await writeWorkbook(XLSX, wb, `inspecciones_${stamp}.xlsx`);
   return { filePath, count: inspections.length };
 }

@@ -12,6 +12,13 @@ export function getDatabase(): SQLite.SQLiteDatabase {
 export async function initializeDatabase(): Promise<void> {
   const database = getDatabase();
 
+  // WAL speeds up the frequent autosave writes; foreign_keys is OFF by default
+  // in SQLite, so the REFERENCES below would be decorative without this.
+  await database.execAsync(`
+    PRAGMA journal_mode = WAL;
+    PRAGMA foreign_keys = ON;
+  `);
+
   await database.execAsync(`
     CREATE TABLE IF NOT EXISTS inspections (
       id TEXT PRIMARY KEY,
@@ -44,6 +51,10 @@ export async function initializeDatabase(): Promise<void> {
       image_base64 TEXT NOT NULL,
       signed_at INTEGER NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_photos_inspection ON photos(inspection_id);
+    CREATE INDEX IF NOT EXISTS idx_signatures_inspection ON signatures(inspection_id);
+    CREATE INDEX IF NOT EXISTS idx_inspections_created ON inspections(created_at DESC);
   `);
 
   // Migrate any legacy 'pending_sync' records to 'completed' — the sync queue

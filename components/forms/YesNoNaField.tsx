@@ -7,10 +7,12 @@ interface Props {
   onChange: (value: YesNoNaValue) => void;
 }
 
-const OPTIONS: { value: YesNoNaValue; label: string; color: string; activeText: string }[] = [
-  { value: 'si', label: 'Sí', color: '#16a34a', activeText: '#ffffff' },
-  { value: 'no', label: 'No', color: '#dc2626', activeText: '#ffffff' },
-  { value: 'na', label: 'N/A', color: '#6b7280', activeText: '#ffffff' },
+// Icons stay visible on every state so the selection is never communicated by
+// color alone (color-blind technicians, direct sunlight in the field).
+const OPTIONS: { value: YesNoNaValue; label: string; icon: string; color: string }[] = [
+  { value: 'si', label: 'Sí', icon: '✓', color: '#16a34a' },
+  { value: 'no', label: 'No', icon: '✗', color: '#dc2626' },
+  { value: 'na', label: 'N/A', icon: '', color: '#6b7280' },
 ];
 
 export default function YesNoNaField({ value, onChange }: Props) {
@@ -21,12 +23,18 @@ export default function YesNoNaField({ value, onChange }: Props) {
         return (
           <TouchableOpacity
             key={opt.value}
-            style={[styles.button, isSelected && { backgroundColor: opt.color }]}
+            style={[
+              styles.button,
+              isSelected && { backgroundColor: opt.color, borderColor: opt.color },
+            ]}
             onPress={() => onChange(isSelected ? null : opt.value)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={opt.label}
+            accessibilityState={{ selected: isSelected }}
           >
-            <Text style={[styles.label, isSelected && { color: opt.activeText }]}>
-              {opt.label}
+            <Text style={[styles.label, isSelected && styles.labelSelected]}>
+              {opt.icon ? `${opt.icon} ${opt.label}` : opt.label}
             </Text>
           </TouchableOpacity>
         );
@@ -44,7 +52,8 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingVertical: 10,
     borderRadius: 6,
-    borderWidth: 1,
+    // Constant width 2 so selecting doesn't shift the layout by a pixel.
+    borderWidth: 2,
     borderColor: '#d1d5db',
     alignItems: 'center',
     backgroundColor: '#f9fafb',
@@ -53,5 +62,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: '#374151',
+  },
+  labelSelected: {
+    color: '#ffffff',
+    fontWeight: '700',
   },
 });

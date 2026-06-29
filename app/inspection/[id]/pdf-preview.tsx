@@ -19,7 +19,8 @@ import {
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
 import { generateInspectionExcel } from '../../../lib/excel-generator';
-import { EMAIL_CONFIG } from '../../../constants/config';
+import { inspectionDate } from '../../../lib/form-data';
+import { loadSettings } from '../../../lib/settings-manager';
 import { getSchema } from '../../../schemas';
 import { Inspection, Photo, Signature } from '../../../types/inspection.types';
 import StatusBadge from '../../../components/ui/StatusBadge';
@@ -36,74 +37,31 @@ async function saveSignatureFile(base64: string, fileName: string): Promise<stri
   return path;
 }
 
-/** Builds the HTML body: form summary + signature images at the bottom. */
-function buildEmailBody(inspection: Inspection, signatures: Signature[]): string {
+// Plain text only: Android mail apps (Gmail) ignore HTML bodies from intents,
+// so the full report travels in the attached Excel — the body is just a summary.
+function buildEmailBody(
+  inspection: Inspection,
+  photoCount: number,
+  hasSignature: boolean
+): string {
   const schema = getSchema(inspection.form_type, inspection.form_version);
-  const formData = JSON.parse(inspection.form_data) as Record<string, unknown>;
-  const date = String(formData['fecha'] ?? formData['inspection_date'] ?? '');
-  const technician = inspection.technician_name;
+  const attachmentParts = ['el reporte en Excel'];
+  if (photoCount > 0) attachmentParts.push(`${photoCount} foto(s) de evidencia`);
+  if (hasSignature) attachmentParts.push('la firma');
 
-  const SKIP_SECTIONS = new Set(['firmas', 'firma', 'evidencia_fotografica']);
-  let sectionsHtml = '';
-
-  if (schema) {
-    for (const section of schema.sections) {
-      if (SKIP_SECTIONS.has(section.id)) continue;
-      let rows = '';
-      for (const field of section.fields) {
-        if (field.type === 'photo' || field.type === 'signature') continue;
-        const raw = formData[field.key];
-        const val =
-          raw === 'si' ? '✓ Sí' :
-          raw === 'no' ? '✗ No' :
-          raw === 'na' ? 'N/A' :
-          raw != null && raw !== '' ? String(raw) : '—';
-        rows += `<tr><td style="padding:5px 10px;color:#374151;width:70%;">${field.label}</td>
-                     <td style="padding:5px 10px;text-align:right;">${val}</td></tr>`;
-        const comment = formData[field.key + '_comentario'];
-        if (comment) rows += `<tr><td colspan="2" style="padding:2px 10px 6px 20px;color:#6b7280;font-size:12px;">↳ ${String(comment)}</td></tr>`;
-      }
-      if (rows) sectionsHtml += `
-        <tr><td colspan="2" style="background:#374151;color:#fff;font-size:11px;font-weight:bold;
-          text-transform:uppercase;padding:5px 10px;">${section.title}</td></tr>${rows}`;
-    }
-  }
-
-  let sigHtml = '';
-  for (const sig of signatures) {
-    const label = sig.signer_type === 'technician' ? 'Firma del Técnico' : 'Firma del Cliente';
-    sigHtml += `<div style="display:inline-block;text-align:center;margin:8px 16px 8px 0;">
-      <p style="font-size:12px;color:#6b7280;margin:0 0 4px;">${label}</p>
-      <img src="${sig.image_base64}" style="max-width:200px;border:1px solid #d1d5db;border-radius:4px;" />
-    </div>`;
-  }
-
-  return `
-  <div style="font-family:Arial,sans-serif;max-width:700px;margin:0 auto;">
-    <div style="background:#1e3a5f;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;">
-      <h2 style="margin:0;font-size:18px;">Fuego &amp; Seguridad</h2>
-      <p style="margin:4px 0 0;opacity:0.8;font-size:13px;">${schema?.name ?? ''}</p>
-    </div>
-    <div style="background:#f3f4f6;padding:12px 20px;">
-      <b>Cliente:</b> ${inspection.client_name} &nbsp;|&nbsp;
-      <b>Fecha:</b> ${date} &nbsp;|&nbsp;
-      <b>Técnico:</b> ${technician} &nbsp;|&nbsp;
-      <b>Ubicación:</b> ${inspection.location}
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;">${sectionsHtml}</table>
-    ${sigHtml ? `<div style="margin-top:16px;padding:12px 20px;border-top:1px solid #e5e7eb;">
-      <p style="font-size:13px;font-weight:bold;color:#374151;margin:0 0 8px;">Firmas</p>
-      ${sigHtml}
-    </div>` : ''}
-    <p style="font-size:10px;color:#9ca3af;text-align:center;padding:12px;">
-      Generado automáticamente — Fuego &amp; Seguridad
-    </p>
-  </div>`;
-}
-
-function inspectionDate(inspection: Inspection): string {
-  const formData = JSON.parse(inspection.form_data) as Record<string, unknown>;
-  return String(formData['fecha'] ?? formData['inspection_date'] ?? '');
+  return [
+    'Fuego & Seguridad',
+    schema?.name ?? 'Reporte de inspección',
+    '',
+    `Cliente: ${inspection.client_name}`,
+    `Fecha: ${inspectionDate(inspection)}`,
+    `Técnico: ${inspection.technician_name}`,
+    `Ubicación: ${inspection.location}`,
+    '',
+    `Se adjunta ${attachmentParts.join(', ')}.`,
+    '',
+    'Generado automáticamente — Fuego & Seguridad',
+  ].join('\n');
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -115,6 +73,7 @@ export default function ShareScreen() {
   const [inspection, setInspection] = useState<Inspection | null>(null);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [signatures, setSignatures] = useState<Signature[]>([]);
+  const [recipientEmail, setRecipientEmail] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSharing, setIsSharing] = useState(false);
 
@@ -122,10 +81,11 @@ export default function ShareScreen() {
     let cancelled = false;
     async function load() {
       try {
-        const [insp, ph, sig] = await Promise.all([
+        const [insp, ph, sig, settings] = await Promise.all([
           getInspection(id),
           getPhotosByInspection(id),
           getSignaturesByInspection(id),
+          loadSettings(),
         ]);
         if (cancelled) return;
         if (!insp) {
@@ -136,6 +96,7 @@ export default function ShareScreen() {
         setInspection(insp);
         setPhotos(ph);
         setSignatures(sig);
+        setRecipientEmail(settings.recipientEmail);
       } catch (error) {
         console.error('[share] Failed to load inspection:', error);
         Alert.alert('Error', 'No se pudo cargar la inspección.');
@@ -148,8 +109,12 @@ export default function ShareScreen() {
     return () => { cancelled = true; };
   }, [id]);
 
-  // Builds the Excel + signature files, opens the mail composer, then cleans up
-  // the temporary files it created (the Excel and signature PNGs).
+  // Builds the Excel + signature files and opens the mail composer.
+  // IMPORTANT: the generated files are NOT deleted here — Gmail re-reads them
+  // in the background when the email is actually sent, so deleting them right
+  // after the composer closes makes the send fail and strands the email in
+  // drafts. They are cleaned up on inspection delete and by the startup
+  // routine in lib/attachment-files.ts.
   async function shareByEmail(): Promise<void> {
     if (!inspection) return;
 
@@ -162,13 +127,11 @@ export default function ShareScreen() {
       return;
     }
 
-    const tempFiles: string[] = [];
     try {
       setIsSharing(true);
 
-      // 1. Generate Excel
+      // 1. Generate Excel (deterministic name — re-sharing overwrites it)
       const excelPath = await generateInspectionExcel(id);
-      tempFiles.push(excelPath);
 
       // 2. Save signatures as PNG files so they can be attached
       const sigPaths: string[] = [];
@@ -178,36 +141,38 @@ export default function ShareScreen() {
           `firma_${sig.signer_type}_${id.slice(0, 8)}.png`
         );
         sigPaths.push(path);
-        tempFiles.push(path);
       }
 
       // 3. Attachments: Excel + photos + signatures (photos are NOT temp files)
       const attachments = [excelPath, ...photos.map((p) => p.local_uri), ...sigPaths];
 
       const subject = `[Inspección] ${inspection.client_name} - ${inspectionDate(inspection)} - ${inspection.technician_name}`;
-      const bodyHtml = buildEmailBody(inspection, signatures);
+      const body = buildEmailBody(inspection, photos.length, signatures.length > 0);
 
       // 4. Mark as sent before opening the composer. Android mail apps don't
       // reliably report back whether the email was actually sent, so we mark it
       // optimistically — the user can re-share from here if they cancel.
+      const previousStatus = inspection.status;
       await updateStatus(id, 'sent');
       setInspection({ ...inspection, status: 'sent' });
 
-      await MailComposer.composeAsync({
-        recipients: [EMAIL_CONFIG.recipientEmail],
-        subject,
-        body: bodyHtml,
-        isHtml: true,
-        attachments,
-      });
+      try {
+        await MailComposer.composeAsync({
+          recipients: [recipientEmail],
+          subject,
+          body,
+          attachments,
+        });
+      } catch (composeError) {
+        // The composer never opened — undo the optimistic 'sent' mark.
+        await updateStatus(id, previousStatus);
+        setInspection({ ...inspection, status: previousStatus });
+        throw composeError;
+      }
     } catch (error) {
       console.error('[share] Failed to share inspection:', error);
       Alert.alert('Error', 'No se pudo preparar el correo. Intenta de nuevo.');
     } finally {
-      // Clean up temp files (Excel + signature PNGs). Photos stay on disk.
-      for (const file of tempFiles) {
-        FileSystem.deleteAsync(file, { idempotent: true }).catch(() => {});
-      }
       setIsSharing(false);
     }
   }
@@ -216,7 +181,7 @@ export default function ShareScreen() {
     if (!inspection) return;
     Alert.alert(
       'Compartir por correo',
-      `Se abrirá tu app de correo con el Excel y las fotos adjuntas para enviar a:\n\n${EMAIL_CONFIG.recipientEmail}`,
+      `Se abrirá tu app de correo con el Excel y las fotos adjuntas para enviar a:\n\n${recipientEmail}`,
       [
         { text: 'Cancelar', style: 'cancel' },
         { text: 'Continuar', onPress: () => { shareByEmail().catch(console.error); } },

@@ -1,10 +1,12 @@
 import { memo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { Inspection } from '../../types/inspection.types';
+import { InspectionListItem } from '../../types/inspection.types';
 import StatusBadge from './StatusBadge';
 
+// InspectionListItem covers everything the card shows; a full Inspection is
+// also accepted since it has the same fields plus more.
 interface Props {
-  inspection: Inspection;
+  inspection: InspectionListItem;
   onPress: () => void;
 }
 
@@ -77,11 +79,11 @@ const styles = StyleSheet.create({
   },
   date: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#6b7280',
   },
   technician: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#6b7280',
     maxWidth: 160,
   },
 });

@@ -78,9 +78,9 @@ remota. Todo es local en el dispositivo. La sincronización ES el correo.
 - **Ubicación no editable** después de crear la inspección. El formulario
   `pump_v2` no tiene campo de ubicación; vive solo en la columna `location`
   poblada en `new.tsx`. El cliente eligió no agregar pantalla de edición.
-- **Correo destinatario hardcodeado** (`hector13-zalo@hotmail.com` en
-  `constants/config.ts`). El cliente lo quiere fijo. Para cambiarlo hay que
-  editar el archivo y recompilar.
+- **Correo destinatario configurable en Ajustes** (desde 2026-06-12). El valor
+  de `constants/config.ts` es solo el default inicial; el vigente vive en
+  `settings.json` (`lib/settings-manager.ts`) y se edita en la pestaña Ajustes.
 - **Status `sent` optimista**: se marca como enviada *antes* de abrir el
   composer, porque Android no reporta si el correo se envió de verdad. Si el
   técnico cancela, puede reenviar desde la pantalla de detalle.
@@ -149,10 +149,7 @@ types/
   form.types.ts                  # FormField, FormSection, FormSchema, FieldType
 
 constants/
-  config.ts                      # EMAIL_CONFIG.recipientEmail + APP_VERSION
-
-stubs/
-  react-native-worklets/         # Stub local para que reanimated compile (NO TOCAR)
+  config.ts                      # EMAIL_CONFIG.recipientEmail (default) + APP_VERSION
 ```
 
 ⭐ = archivos centrales que tocarás con más frecuencia.
@@ -212,25 +209,61 @@ columnas reales. Las inspecciones viejas siguen legibles tras cambiar el schema.
 | Problema | Estado / intento |
 |----------|------------------|
 | **El correo no llega en iPhone** | `expo-mail-composer` en iOS abre Apple Mail; si no hay cuenta configurada, el correo queda en el outbox local y nunca sale. **La app es para Android (Gmail).** En iOS solo sirve para pruebas visuales. No es un bug a resolver. |
-| **Foreign keys no se aplican** | SQLite tiene `PRAGMA foreign_keys` OFF por defecto y nunca se activa. Las `REFERENCES` en `db.ts` son decorativas. El borrado en cascada se hace manualmente en `deleteInspectionCompletely()`. |
-| **Versiones de paquetes con parche pendiente** | `expo start` avisa que expo (54.0.34→35), expo-file-system y expo-router tienen parches. No bloquea. Correr `npx expo install --fix` cuando se quiera alinear. |
-| **`react-native-worklets` es un stub local** | Parche para que reanimated compile en este setup. Frágil ante updates de reanimated. No se ha resuelto la dependencia real. |
+| **El correo se quedaba en borradores sin Excel/firma** | Segunda causa (2026-06-12): la app borraba el Excel y la firma en cuanto el composer cerraba, pero Gmail los relee en segundo plano al ENVIAR — si ya no existen, el envío falla y el borrador conserva solo la foto (único archivo no borrado). Fix: los archivos generados persisten (nombres deterministas, se sobreescriben al re-compartir); se limpian al borrar la inspección y al arrancar la app si tienen +3 días (`lib/attachment-files.ts`). |
+| **Adjuntos fallaban SIEMPRE ("Couldn't attach file")** | Causa real (diagnóstico 2026-06-12, tras descartar la teoría de rutas de Expo Go): **bug de `expo-mail-composer@15.0.8` en Android** — agrega `FLAG_GRANT_READ_URI_PERMISSION` al chooser pero no al intent interno, y sin ClipData Android no propaga el permiso; Gmail recibe URIs `content://` que no puede leer. Corregido con **`patches/expo-mail-composer+15.0.8.patch`** (patch-package, hook `postinstall`): agrega ClipData + flag al intent del correo en `MailIntentBuilder.kt`. Solo aplica a builds nativos (APK); **en Expo Go los adjuntos siguen fallando** porque su binario no se puede parchar. NO borrar la carpeta `patches/` ni el script `postinstall`. |
+| **El cuerpo HTML del correo salía como texto revuelto** | Resuelto: Android ignora HTML de intents (`Html.fromHtml` → texto plano). El cuerpo ahora es un resumen corto en texto plano; el reporte completo va solo en el Excel adjunto. |
+| **Versiones de paquetes** | RESUELTO 2026-06-12: `npx expo install --fix` aplicado (expo 54.0.35, router 6.0.24, file-system 19.0.23). |
+| **`react-native-worklets` era un stub local** | RESUELTO 2026-06-12: el stub (solo JS, sin código nativo) hacía fallar el build de Gradle en EAS. Se eliminó `stubs/` y se instaló el paquete real `react-native-worklets@0.5.1` (la misma versión nativa que trae Expo Go SDK 54). Se quitó `worklets: false` de `babel.config.js` y se activó `newArchEnabled: true` en app.json (reanimated 4 la requiere; Expo Go ya corría así). |
+| **`npm install` falla con ERESOLVE** | Conflicto preexistente react 19.1.0 vs react-dom 19.2.x transitivo. Resuelto con `.npmrc` (`legacy-peer-deps=true`) — necesario también para que EAS Build instale en sus servidores. No borrar ese archivo. |
 
 ---
 
 ## 8. Próximos pasos (en orden de prioridad)
 
-1. **Generar el APK de entrega** con EAS Build y probarlo en un Android real con
-   Gmail. Es el entregable final. (Ver comandos abajo.)
+> **ESTADO VIVO (2026-06-12, fin de sesión):** se llevan 4 builds de EAS. El
+> ÚLTIMO APK a probar es el build `f1111aa6` →
+> https://expo.dev/artifacts/eas/0_cvAFTJ-bHXEos0MlwiqxrcP2zHeP0xpaWP_zhIw98.apk
+> Incluye el parche de adjuntos + el fix de "se queda en borradores" (los
+> archivos Excel/firma ya no se borran al compartir). **Falta que Héctor
+> confirme que el correo SÍ se envía (sale de Borradores) y llega con Excel +
+> foto + firma.** Si llega completo, el flujo crítico queda cerrado.
+> ⚠️ TODO el trabajo de 2026-06-11/12 está SIN COMMITEAR en git (working tree,
+> rama `main`, único commit es "Initial commit"). Commitear cuanto antes.
+
+1. **VERIFICAR el APK `f1111aa6`** (link arriba): instalar, compartir una
+   inspección con foto+firma, tocar Enviar en Gmail, confirmar que sale de
+   Borradores y llega al destinatario con los 3 adjuntos. Si falla, revisar
+   logs nativos del envío. (Los adjuntos NO funcionan en Expo Go por diseño,
+   ver sección 7 — probar SIEMPRE en APK.)
+2. **Logo/icono de la empresa** + APK de entrega final.
 2. **Agregar tests** mínimos: `excel-generator` (que el Excel salga bien) y la
    lógica de validación de `fill.tsx`. Es lo más arriesgado sin cobertura.
-3. **Activar `PRAGMA foreign_keys = ON`** en `db.ts` o documentar que el borrado
-   se maneja en código.
-4. **Índices en SQLite** para `photos.inspection_id` y `signatures.inspection_id`
-   (mejora lecturas cuando crezcan los datos).
-5. **Logo de la empresa** en header del Excel y del correo (profesionalismo).
-6. **Búsqueda por texto** en el historial.
-7. (Opcional) Pantalla de edición de cliente/ubicación post-creación.
+3. **Logo de la empresa** en header del Excel y del correo (profesionalismo).
+4. **Búsqueda por texto** en el historial.
+5. (Opcional) Pantalla de edición de cliente/ubicación post-creación.
+
+> Hecho (2026-06-11): PRAGMA foreign_keys + WAL e índices en `db.ts`; banner de
+> `saveError` y flush del autosave al salir de `fill.tsx`; `parseFormData`
+> defensivo compartido en `lib/form-data.ts`; cuerpo del correo en texto plano;
+> reversión del status `sent` si el composer falla; pantalla de error si la BD
+> no inicializa (`_layout.tsx`).
+>
+> Hecho (2026-06-12): correo destinatario configurable en Ajustes (settings.json);
+> onboarding al primer arranque que pide el nombre completo del técnico
+> (`app/_layout.tsx`); iconos Ionicons en los tabs (`@expo/vector-icons`, nuevo
+> en package.json — instalar con `--legacy-peer-deps`); chip de comentario más
+> visible en `FormField.tsx`; `SafeAreaView` migrado a
+> `react-native-safe-area-context` en `SignatureField.tsx`. Ver
+> `UX_PERFORMANCE_REPORT.md` (raíz del repo) para el backlog de mejoras UX,
+> accesibilidad y rendimiento.
+>
+> Hecho (2026-06-12, 2ª tanda): listas con columnas selectivas — nuevo tipo
+> `InspectionListItem` + `getInspectionsForList()` y `getInspectionCounts()`
+> en `inspections.repo.ts`; `getAllInspections()` queda solo para el Excel
+> maestro. Lazy import de `xlsx` en `excel-generator.ts`. Accesibilidad:
+> botones Sí/No/N/A con icono ✓/✗ y borde constante (no solo color) +
+> props de accesibilidad; gris `#9ca3af` → `#6b7280` en todos los textos
+> (contraste WCAG AA). Verificado con tsc y `expo export` de producción.
 
 Ver `IMPROVEMENT_AUDIT.md` para el detalle completo.
 
@@ -268,8 +301,8 @@ calidad automatizado es `tsc --noEmit`.
 - **Los `key` de los campos en `pump-form.schema.ts`**: son las claves del JSON
   `form_data`. Cambiarlos rompe la lectura de inspecciones ya guardadas. Si el
   formulario cambia de estructura, crear `pump_v3`, no editar `pump_v2`.
-- **`stubs/react-native-worklets/`**: parche de build. Borrarlo rompe la
-  compilación de reanimated.
+- **`.npmrc`**: contiene `legacy-peer-deps=true`. Borrarlo rompe `npm install`
+  local y el build de EAS.
 - **El nombre del archivo `pdf-preview.tsx`**: ya no genera PDF (es la pantalla
   de detalle/compartir), pero renombrarlo obliga a actualizar las rutas en
   `_layout.tsx`, `index.tsx` y `history.tsx`. Hazlo solo si actualizas las tres.

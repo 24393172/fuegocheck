@@ -1,8 +1,8 @@
 import { useCallback, useState } from 'react';
 import { View, Text, FlatList, StyleSheet, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { Inspection, InspectionStatus } from '../../types/inspection.types';
-import { getAllInspections } from '../../lib/repositories/inspections.repo';
+import { InspectionListItem, InspectionStatus } from '../../types/inspection.types';
+import { getInspectionsForList } from '../../lib/repositories/inspections.repo';
 import InspectionCard from '../../components/ui/InspectionCard';
 
 type FilterOption = 'all' | InspectionStatus;
@@ -16,13 +16,13 @@ const FILTERS: { key: FilterOption; label: string }[] = [
 
 export default function HistoryScreen() {
   const router = useRouter();
-  const [inspections, setInspections] = useState<Inspection[]>([]);
+  const [inspections, setInspections] = useState<InspectionListItem[]>([]);
   const [filter, setFilter] = useState<FilterOption>('all');
   const [isLoading, setIsLoading] = useState(true);
 
   async function loadInspections() {
     try {
-      const all = await getAllInspections();
+      const all = await getInspectionsForList();
       setInspections(all);
     } catch (error) {
       console.error('[history] Failed to load inspections:', error);
@@ -41,7 +41,7 @@ export default function HistoryScreen() {
   const filtered =
     filter === 'all' ? inspections : inspections.filter((i) => i.status === filter);
 
-  function handlePress(inspection: Inspection) {
+  function handlePress(inspection: InspectionListItem) {
     if (inspection.status === 'draft') {
       router.push(`/inspection/${inspection.id}/fill`);
     } else {
@@ -147,7 +147,7 @@ const styles = StyleSheet.create({
   },
   emptySubtext: {
     fontSize: 13,
-    color: '#9ca3af',
+    color: '#6b7280',
     textAlign: 'center',
   },
 });

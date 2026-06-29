@@ -206,14 +206,14 @@ vez de "todo", y una política de archivado/borrado de inspecciones antiguas.
 
 | # | Mejora | Archivo | Esfuerzo |
 |---|--------|---------|----------|
-| QW1 | **Mostrar `saveError`** al usuario (banner rojo). El dato ya está en el store. | `fill.tsx` | S |
-| QW2 | **`parseFormData()` defensivo** en la pantalla de detalle. | `pdf-preview.tsx` | S |
-| QW3 | **Índices** en `photos.inspection_id` y `signatures.inspection_id`. | `db.ts` | S |
-| QW4 | **`PRAGMA foreign_keys = ON` + `journal_mode = WAL`**. | `db.ts` | S |
+| QW1 | ✅ HECHO — **Mostrar `saveError`** al usuario (banner rojo). También se agregó flush del autosave pendiente al salir de la pantalla. | `fill.tsx` | S |
+| QW2 | ✅ HECHO — **`parseFormData()` defensivo** compartido en `lib/form-data.ts`. | `pdf-preview.tsx` | S |
+| QW3 | ✅ HECHO — **Índices** en `photos.inspection_id`, `signatures.inspection_id` y `inspections.created_at`. | `db.ts` | S |
+| QW4 | ✅ HECHO — **`PRAGMA foreign_keys = ON` + `journal_mode = WAL`**. | `db.ts` | S |
 | QW5 | **`constants/colors.ts`** y reemplazar `#1e3a5f`. | nuevo + varios | S |
-| QW6 | **Lista con columnas selectivas** (sin `form_data`). | `inspections.repo.ts` | S |
+| QW6 | ✅ HECHO — **Lista con columnas selectivas** (`getInspectionsForList` + `getInspectionCounts`, tipo `InspectionListItem`). | `inspections.repo.ts` | S |
 | QW7 | **Versión desde `expo-constants`** (eliminar duplicado). | `config.ts`, `settings.tsx` | S |
-| QW8 | **Lazy import de `xlsx`**. | `excel-generator.ts` | S |
+| QW8 | ✅ HECHO — **Lazy import de `xlsx`**. | `excel-generator.ts` | S |
 | QW9 | **Renombrar `pdf-preview.tsx` → `share.tsx`** (+3 referencias). | varios | S |
 | QW10 | **Mostrar la fecha (solo lectura)** en el encabezado del formulario. | `fill.tsx` | S |
 | QW11 | **Helper único `si/no/na`** y reutilizarlo. | nuevo + 3 archivos | S |

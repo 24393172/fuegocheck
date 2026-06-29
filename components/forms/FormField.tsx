@@ -43,7 +43,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                 onBlur={onBlur}
                 keyboardType={field.type === 'number' ? 'numeric' : 'default'}
                 placeholder={field.label}
-                placeholderTextColor="#9ca3af"
+                placeholderTextColor="#6b7280"
               />
             )}
 
@@ -56,7 +56,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                 multiline
                 numberOfLines={4}
                 placeholder={field.label}
-                placeholderTextColor="#9ca3af"
+                placeholderTextColor="#6b7280"
                 textAlignVertical="top"
               />
             )}
@@ -81,7 +81,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                             value={(commentVal as string) ?? ''}
                             onChangeText={onCommentChange}
                             placeholder="Escribe un comentario..."
-                            placeholderTextColor="#9ca3af"
+                            placeholderTextColor="#6b7280"
                             multiline
                             numberOfLines={2}
                             textAlignVertical="top"
@@ -98,14 +98,14 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                       ) : (
                         <TouchableOpacity
                           onPress={() => setShowComment(true)}
-                          style={styles.commentChip}
+                          style={[styles.commentChip, commentVal ? styles.commentChipFilled : null]}
                           activeOpacity={0.6}
                           hitSlop={{ top: 2, bottom: 2, left: 4, right: 4 }}
                         >
                           <Text style={styles.commentChipText}>
                             {commentVal
                               ? `💬 ${String(commentVal).slice(0, 40)}${String(commentVal).length > 40 ? '…' : ''}`
-                              : '+ comentario'}
+                              : '💬 Comentario'}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -169,14 +169,21 @@ const styles = StyleSheet.create({
   },
   commentChip: {
     alignSelf: 'flex-start',
-    paddingVertical: 3,
-    paddingHorizontal: 2,
-    marginTop: 2,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    marginTop: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+    backgroundColor: '#eff6ff',
+  },
+  commentChipFilled: {
+    borderColor: '#93c5fd',
   },
   commentChipText: {
-    fontSize: 11,
-    color: '#9ca3af',
-    fontStyle: 'italic',
+    fontSize: 12,
+    color: '#2563eb',
+    fontWeight: '500',
   },
   commentInputWrapper: {
     gap: 6,

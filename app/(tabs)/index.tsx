@@ -1,8 +1,11 @@
 import { useCallback, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { Inspection } from '../../types/inspection.types';
-import { getAllInspections } from '../../lib/repositories/inspections.repo';
+import { InspectionListItem } from '../../types/inspection.types';
+import {
+  getInspectionsForList,
+  getInspectionCounts,
+} from '../../lib/repositories/inspections.repo';
 import InspectionCard from '../../components/ui/InspectionCard';
 
 interface Stats {
@@ -22,25 +25,25 @@ function StatCard({ value, label, color }: { value: number; label: string; color
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const [recent, setRecent] = useState<Inspection[]>([]);
+  const [recent, setRecent] = useState<InspectionListItem[]>([]);
   const [stats, setStats] = useState<Stats>({ total: 0, pending: 0, sent: 0 });
 
   useFocusEffect(
     useCallback(() => {
-      getAllInspections()
-        .then((all) => {
-          setRecent(all.slice(0, 5));
+      Promise.all([getInspectionsForList(5), getInspectionCounts()])
+        .then(([latest, counts]) => {
+          setRecent(latest);
           setStats({
-            total: all.length,
-            pending: all.filter((i) => i.status === 'draft' || i.status === 'completed').length,
-            sent: all.filter((i) => i.status === 'sent').length,
+            total: counts.draft + counts.completed + counts.sent,
+            pending: counts.draft + counts.completed,
+            sent: counts.sent,
           });
         })
         .catch(console.error);
     }, [])
   );
 
-  function handleCardPress(inspection: Inspection) {
+  function handleCardPress(inspection: InspectionListItem) {
     if (inspection.status === 'draft') {
       router.push(`/inspection/${inspection.id}/fill`);
     } else {

@@ -183,6 +183,6 @@ const styles = StyleSheet.create({
   },
   addSubtext: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#6b7280',
   },
 });

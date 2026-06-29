@@ -7,8 +7,8 @@ import {
   StyleSheet,
   Alert,
   Modal,
-  SafeAreaView,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import SignatureView, { SignatureViewRef } from 'react-native-signature-canvas';
 import { saveSignature, deleteSignaturesByInspection } from '../../lib/repositories/signatures.repo';
 import { Signature } from '../../types/inspection.types';
@@ -205,7 +205,7 @@ const styles = StyleSheet.create({
   },
   addSubtext: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#6b7280',
   },
 
   // ── Modal ──────────────────────────────────────────────────────────────────

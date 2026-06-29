@@ -1,13 +1,18 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { EMAIL_CONFIG } from '../constants/config';
 
 export interface AppSettings {
   technicianName: string;
+  recipientEmail: string;
 }
 
 const SETTINGS_PATH = `${FileSystem.documentDirectory}settings.json`;
 
+// recipientEmail defaults to the company address in config.ts; settings.json
+// saved before this field existed simply falls back to the default on load.
 const DEFAULT_SETTINGS: AppSettings = {
   technicianName: '',
+  recipientEmail: EMAIL_CONFIG.recipientEmail,
 };
 
 export async function loadSettings(): Promise<AppSettings> {

@@ -64,7 +64,7 @@ function computeProgress(
 export default function FillScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { isSaving, setIsSaving, setSaveError } = useInspectionStore();
+  const { isSaving, saveError, setIsSaving, setSaveError } = useInspectionStore();
 
   const [inspection, setInspection] = useState<Inspection | null>(null);
   const [schema, setSchema] = useState<FormSchema | null>(null);
@@ -74,6 +74,9 @@ export default function FillScreen() {
   const [signaturesByType, setSignaturesByType] = useState<Record<string, Signature>>({});
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds values not yet persisted, so leaving the screen mid-debounce can
+  // flush them instead of silently dropping the last change.
+  const pendingValuesRef = useRef<FieldValues | null>(null);
 
   const { control, watch, reset } = useForm<FieldValues>({ defaultValues: {} });
   const watchedValues = useWatch({ control });
@@ -120,6 +123,7 @@ export default function FillScreen() {
     if (!inspection) return;
 
     const subscription = watch((values) => {
+      pendingValuesRef.current = values;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(async () => {
         try {
@@ -128,9 +132,10 @@ export default function FillScreen() {
           await updateInspection(id, {
             form_data: JSON.stringify(values),
             client_name: (values['cliente'] as string) || inspection.client_name,
-            location: (values['location'] as string) || inspection.location,
             technician_name: (values['tecnico'] as string) || inspection.technician_name,
           });
+          // Only clear if no newer keystroke replaced the pending values.
+          if (pendingValuesRef.current === values) pendingValuesRef.current = null;
         } catch (error) {
           console.error('[fill] Autosave failed:', error);
           setSaveError('Error al guardar. Verifica tu almacenamiento.');
@@ -143,6 +148,15 @@ export default function FillScreen() {
     return () => {
       subscription.unsubscribe();
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      // Flush any unsaved changes so leaving the screen never loses data.
+      const pending = pendingValuesRef.current;
+      if (pending) {
+        updateInspection(id, {
+          form_data: JSON.stringify(pending),
+          client_name: (pending['cliente'] as string) || inspection.client_name,
+          technician_name: (pending['tecnico'] as string) || inspection.technician_name,
+        }).catch((error) => console.error('[fill] Flush on exit failed:', error));
+      }
     };
   }, [inspection, id]);
 
@@ -153,9 +167,9 @@ export default function FillScreen() {
       await updateInspection(id, {
         form_data: JSON.stringify(currentValues),
         client_name: (currentValues['cliente'] as string) || inspection!.client_name,
-        location: (currentValues['location'] as string) || inspection!.location,
         technician_name: (currentValues['tecnico'] as string) || inspection!.technician_name,
       });
+      pendingValuesRef.current = null;
 
       await updateStatus(id, 'completed');
       router.push(`/inspection/${id}/pdf-preview`);
@@ -317,6 +331,12 @@ export default function FillScreen() {
         </Text>
       </View>
 
+      {saveError && (
+        <View style={styles.saveErrorBanner}>
+          <Text style={styles.saveErrorText}>⚠ {saveError}</Text>
+        </View>
+      )}
+
       <ScrollView>
         {schema.sections.map((section) => (
           <View key={section.id}>
@@ -383,6 +403,16 @@ const styles = StyleSheet.create({
     color: '#6b7280',
     fontWeight: '500',
     textAlign: 'right',
+  },
+  saveErrorBanner: {
+    backgroundColor: '#dc2626',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  saveErrorText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   mediaFieldWrapper: {
     paddingHorizontal: 16,

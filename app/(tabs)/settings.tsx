@@ -12,17 +12,26 @@ import {
 import * as Sharing from 'expo-sharing';
 import { loadSettings, saveSettings } from '../../lib/settings-manager';
 import { generateMasterExcel } from '../../lib/excel-generator';
-import { EMAIL_CONFIG, APP_VERSION } from '../../constants/config';
+import { APP_VERSION } from '../../constants/config';
+
+// Simple format check — good enough to catch typos before the composer opens.
+function isValidEmail(email: string): boolean {
+  return /^\S+@\S+\.\S+$/.test(email);
+}
 
 export default function SettingsScreen() {
   const [technicianName, setTechnicianName] = useState('');
+  const [recipientEmail, setRecipientEmail] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
   useEffect(() => {
     loadSettings()
-      .then((s) => setTechnicianName(s.technicianName))
+      .then((s) => {
+        setTechnicianName(s.technicianName);
+        setRecipientEmail(s.recipientEmail);
+      })
       .catch(console.error)
       .finally(() => setIsLoading(false));
   }, []);
@@ -32,9 +41,16 @@ export default function SettingsScreen() {
       Alert.alert('Campo requerido', 'Ingresa el nombre del técnico.');
       return;
     }
+    if (!isValidEmail(recipientEmail.trim())) {
+      Alert.alert('Correo inválido', 'Revisa el correo del destinatario (ej. nombre@empresa.com).');
+      return;
+    }
     try {
       setIsSaving(true);
-      await saveSettings({ technicianName: technicianName.trim() });
+      await saveSettings({
+        technicianName: technicianName.trim(),
+        recipientEmail: recipientEmail.trim(),
+      });
       Alert.alert('Guardado', 'Configuración guardada correctamente.');
     } catch (error) {
       console.error('[settings] Save failed:', error);
@@ -91,11 +107,30 @@ export default function SettingsScreen() {
           value={technicianName}
           onChangeText={setTechnicianName}
           placeholder="Nombre completo"
-          placeholderTextColor="#9ca3af"
+          placeholderTextColor="#6b7280"
           autoCapitalize="words"
         />
         <Text style={styles.hint}>
           Se usará automáticamente al crear nuevas inspecciones.
+        </Text>
+      </View>
+
+      <Text style={styles.sectionTitle}>Correo electrónico</Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Destinatario de los reportes</Text>
+        <TextInput
+          style={styles.input}
+          value={recipientEmail}
+          onChangeText={setRecipientEmail}
+          placeholder="nombre@empresa.com"
+          placeholderTextColor="#6b7280"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        <Text style={styles.hint}>
+          Al compartir una inspección, el correo se abre con el Excel y las fotos
+          adjuntos, dirigido a esta dirección. Solo hay que tocar Enviar.
         </Text>
       </View>
 
@@ -109,18 +144,6 @@ export default function SettingsScreen() {
           {isSaving ? 'Guardando...' : 'Guardar'}
         </Text>
       </TouchableOpacity>
-
-      <Text style={styles.sectionTitle}>Correo electrónico</Text>
-      <View style={styles.card}>
-        <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Destinatario</Text>
-          <Text style={styles.infoValue}>{EMAIL_CONFIG.recipientEmail}</Text>
-        </View>
-        <Text style={styles.hint}>
-          Al completar una inspección, el correo se abre automáticamente con el
-          Excel y las fotos ya adjuntos. Solo hay que tocar Enviar.
-        </Text>
-      </View>
 
       <Text style={styles.sectionTitle}>Exportar datos</Text>
       <View style={styles.card}>
@@ -209,7 +232,7 @@ const styles = StyleSheet.create({
   },
   hint: {
     fontSize: 12,
-    color: '#9ca3af',
+    color: '#6b7280',
     lineHeight: 16,
   },
   saveButton: {
