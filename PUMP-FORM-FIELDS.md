@@ -1,134 +1,82 @@
-# Pump Inspection Form — Field Reference
+# Pump Inspection Forms — Field Reference
 
-This document maps the digital form fields to the original paper form.
-Before changing any field key, check if there are existing inspections that use it.
+An inspection is a **site visit** (`form_type = 'site_v1'`) that can contain up
+to three pumps. Each pump is its own schema. **The source of truth for the exact
+fields is the schema files** — keep those authoritative, not this doc:
 
-## How to read this
-
-- **key**: The JSON key stored in `form_data` column in SQLite. Never change a key once used in production.
-- **type**: Field input type
-- **required**: Whether form can be completed without this field (all v2 fields are `false` — soft warning instead)
-
----
-
-## Form ID: `pump_v2` (current — used for all new inspections)
-
-Form title: "Reporte de Inspección, Pruebas y Mantenimiento a Bomba de Combustión Interna Contra Incendios"
-
-### Section 0 — Datos Generales
-
-| key | label | type | required | notes |
-|-----|-------|------|----------|-------|
-| cliente | Cliente | text | no | Pre-filled from new inspection screen |
-| atencion | Atención (Ing. responsable) | text | no | |
-| area | Área (ej. Cuarto de Máquinas) | text | no | |
-| fecha | Fecha | text | no | Auto-filled with today's date |
-| tecnico | Técnico Responsable | text | no | Auto-filled from settings |
-| potencia | Potencia (HP) | text | no | |
-| capacidad | Capacidad (L/SEG) | text | no | |
-| voltaje_operacion | Voltaje de Operación (V) | text | no | |
-
-### Section 1 — Succión y Descarga
-
-All `yes_no_na`. Selecting "No" shows a mandatory comment field stored as `key + "_comentario"`.
-
-| key | label | type | required |
-|-----|-------|------|----------|
-| 1_1 | 1.1 ¿La válvula de succión se encuentra abierta? | yes_no_na | no |
-| 1_2 | 1.2 ¿La válvula de succión se encuentra asegurada y/o supervisada? | yes_no_na | no |
-| 1_3 | 1.3 ¿La válvula de descarga se encuentra abierta? | yes_no_na | no |
-| 1_4 | 1.4 ¿La válvula de descarga se encuentra asegurada y/o supervisada? | yes_no_na | no |
-| 1_5 | 1.5 ¿Se encuentra instalada la válvula de alivio? | yes_no_na | no |
-| 1_6 | 1.6 ¿Se encuentra en buen estado el acoplamiento mecánico? | yes_no_na | no |
-| 1_7 | 1.7 ¿Cuenta con las guardas el acoplamiento mecánico? | yes_no_na | no |
-| 1_8 | 1.8 ¿Se encuentra el manómetro de la línea de descarga operando? | yes_no_na | no |
-
-### Section 2 — Tablero de Control
-
-All `yes_no_na`. Selecting "No" shows a comment field (`key + "_comentario"`).
-
-| key | label | type | required |
-|-----|-------|------|----------|
-| 2_1 | 2.1 ¿Se encontró el selector en modo automático? | yes_no_na | no |
-| 2_2 | 2.2 ¿Funcionan los focos pilotos del tablero? | yes_no_na | no |
-| 2_3 | 2.3 ¿Opera correctamente el interruptor principal? | yes_no_na | no |
-| 2_4 | 2.4 ¿El tablero y/o sus componentes son aprobados? (NFPA 20) | yes_no_na | no |
-| 2_5 | 2.5 ¿La línea piloto se encuentra instalada correctamente? | yes_no_na | no |
-
-### Section 3 — Pruebas
-
-Mix of `yes_no_na` and numeric reading fields. `yes_no_na` rows trigger comment field on "No".
-
-| key | label | type | required | notes |
-|-----|-------|------|----------|-------|
-| 3_1 | 3.1 ¿Opera el equipo de modo manual? | yes_no_na | no | |
-| 3_2 | 3.2 ¿Opera el equipo en automático? | yes_no_na | no | |
-| 3_2_presion_arranque | Presión de Arranque (PSI) | number | no | Sub-reading for 3.2 |
-| 3_2_presion_paro | Presión de Paro (PSI) | number | no | Sub-reading for 3.2 |
-| 3_3 | 3.3 ¿El tiempo de retardo de paro es correcto? | yes_no_na | no | |
-| 3_3_segundos | Tiempo de retardo (segundos) | text | no | Sub-reading for 3.3 |
-| 3_4 | 3.4 ¿Se verificó el voltaje de entrada en el interruptor principal? | yes_no_na | no | |
-| 3_4_v_entrada_f1 | Voltaje entrada Fase 1 (V) | number | no | Sub-reading for 3.4 |
-| 3_4_v_entrada_f2 | Voltaje entrada Fase 2 (V) | number | no | Sub-reading for 3.4 |
-| 3_4_v_entrada_f3 | Voltaje entrada Fase 3 (V) | number | no | Sub-reading for 3.4 |
-| 3_5 | 3.5 ¿Se verificó el voltaje de salida en el contactor de arranque? | yes_no_na | no | |
-| 3_5_v_salida_f1 | Voltaje salida Fase 1 (V) | number | no | Sub-reading for 3.5 |
-| 3_5_v_salida_f2 | Voltaje salida Fase 2 (V) | number | no | Sub-reading for 3.5 |
-| 3_5_v_salida_f3 | Voltaje salida Fase 3 (V) | number | no | Sub-reading for 3.5 |
-| 3_6 | 3.6 ¿Se verificó la corriente de trabajo del motor? | yes_no_na | no | |
-| 3_6_amp_f1 | Amperes Fase 1 (A) | number | no | Sub-reading for 3.6 |
-| 3_6_amp_f2 | Amperes Fase 2 (A) | number | no | Sub-reading for 3.6 |
-| 3_6_amp_f3 | Amperes Fase 3 (A) | number | no | Sub-reading for 3.6 |
-| 3_7 | 3.7 ¿El motor cuenta con las RPM adecuadas? | yes_no_na | no | |
-| 3_8 | 3.8 ¿Los empaques de la bomba sellan correctamente? | yes_no_na | no | |
-| 3_9 | 3.9 ¿Existen ruidos o vibraciones anormales? | yes_no_na | no | |
-| 3_10 | 3.10 ¿Existe sobre calentamiento en carcaza de la bomba? | yes_no_na | no | |
-| 3_11 | 3.11 ¿Existe sobre calentamiento en carcaza del motor? | yes_no_na | no | |
-| 3_12 | 3.12 ¿Los estoperos se encuentran lubricados? | yes_no_na | no | |
-| 3_13 | 3.13 ¿La válvula de alivio se encuentra calibrada? | yes_no_na | no | |
-| 3_14 | 3.14 ¿El equipo queda en modo automático? | yes_no_na | no | |
-
-### Section 4 — Evidencia Fotográfica
-
-| key | label | type | required |
-|-----|-------|------|----------|
-| photo_general | Foto general del equipo | photo | no |
-| photo_panel | Foto del tablero de control | photo | no |
-| photo_extra | Foto adicional (opcional) | photo | no |
-
-### Section 5 — Observaciones
-
-| key | label | type | required |
-|-----|-------|------|----------|
-| observaciones | Observaciones generales | textarea | no |
-
-### Section 6 — Firma
-
-Only the technician signs. No client signature in this form.
-
-| key | label | type | required |
-|-----|-------|------|----------|
-| firma_tecnico | Firma del técnico inspector | signature | no |
+- `schemas/jockey-form.schema.ts` — Bomba Jockey
+- `schemas/electrica-form.schema.ts` — Bomba Eléctrica
+- `schemas/diesel-form.schema.ts` — Bomba de Combustión Interna Diésel
+- `schemas/index.ts` — `PUMP_SCHEMAS` registry + `getSchema()`
 
 ---
 
-## Form ID: `pump_v1` (legacy — do not use for new inspections)
+## How form_data is shaped
 
-Kept in the registry so old saved inspections still render. Do not modify.
-See git history for original field list.
+```json
+{
+  "site":  { "cliente": "...", "atencion": "...", "area": "...", "fecha": "...", "tecnico": "..." },
+  "pumps": { "jockey": { "1_1": "si", ... }, "diesel": { ... }, "electrica": { ... } }
+}
+```
+
+Each pump stores its answers under its id. Types live in
+`types/inspection.types.ts` (`SiteFormData`).
+
+---
+
+## Field conventions
+
+- **key**: JSON key inside that pump's object (`form_data.pumps.<bomba>.<key>`).
+  Never rename a key once it has production data.
+- **type**: `text` | `number` | `yes_no_na` | `textarea` | `photo`
+- **required**: every checklist question is `false` (soft warning). The hard
+  requirements are at the inspection level — a signature + at least one pump with
+  data — enforced in `app/inspection/[id]/index.tsx`.
+- **yes_no_na** values are stored lowercase: `'si' | 'no' | 'na'`. Any answer can
+  carry a comment stored as `key + '_comentario'`.
+- **parametro?**: fixed reference text printed on the paper sheet (e.g. `NFPA 20`),
+  shown in the Excel "Parámetros" column. The technician does not fill it.
+- **readingKeys?**: keys of the `number` fields that are this question's "Lecturas"
+  (e.g. voltage per phase). Those number fields are listed right after the
+  question in the same section.
+- **Photos**: stored with `field_key` prefixed by pump id, e.g. `diesel:photo_general`.
+- **Signature**: one per inspection (`signer_type = 'technician'`), captured on
+  the index screen — it is NOT part of any pump schema.
+
+---
+
+## Per-pump structure (summary)
+
+### Jockey (`jockey`)
+Datos de la bomba (potencia / capacidad / voltaje) · Succión y Descarga (1.1–1.8) ·
+Tablero de Control (2.1–2.5; 2.5 parámetro `NFPA 20`) · Pruebas (3.1–3.14, con
+lecturas: 3.2 presiones arranque/paro, 3.3 segundos, 3.4/3.5 voltajes por fase,
+3.6 amperes por fase) · Observaciones · Foto.
+
+### Eléctrica (`electrica`)
+Como la jockey **+5 preguntas**: 1.6 válvula eliminadora de aire, 1.10
+manovacuómetro de succión, 1.11 nivel de aceite del cabezal, 2.4 palanca de
+arranque de emergencia, 3.2 mecanismo de arranque de emergencia. Resulta en
+Succión 1.1–1.11 · Tablero 2.1–2.6 (2.6 parámetro `NFPA 20`) · Pruebas 3.1–3.15.
+
+### Diésel (`diesel`)
+Estructura distinta: Succión y Descarga (1.1–1.11) · Banco de Baterías (2.1–2.3;
+2.2 y 2.3 con lecturas Banco #1 / Banco #2) · Sistema de Enfriamiento (3.1–3.3) ·
+Sistema de Lubricación y Combustible (4.1–4.4; 4.3 parámetro `2/3 NFPA 20`) ·
+Sistema Motriz (5.1–5.5; 5.5 con lectura Banco #1) · Observaciones · Foto. No
+tiene sección de Pruebas eléctricas.
 
 ---
 
 ## Versioning policy
 
-If fields are added, removed, or renamed:
-1. Create `pump_v3` export in `pump-form.schema.ts` (new export, same file)
-2. Increment `version` to `3`
-3. Keep `pump_v2` export — old inspections still reference it for rendering
-4. Update `schemas/index.ts` to register the new version
-5. New inspections will use `pump_v3`
-6. Old inspections stored as `pump_v2` will still render correctly
+The schemas were built fresh from the paper sheets; there is **no production data
+yet**, so keys could be defined cleanly. From now on:
 
-**Never rename a field key in an existing version.**
-**Never delete a field key from an existing version.**
-**Never change `required` behavior for an existing version.**
+- If a paper form changes, bump that pump's `version` and add a new schema export.
+- Inspections store `form_version`, so old records keep rendering with the schema
+  they were created with.
+
+**Never** rename or delete a field key, or change the section structure, of a
+version that already has saved inspections.

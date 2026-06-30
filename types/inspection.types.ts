@@ -1,5 +1,25 @@
 export type InspectionStatus = 'draft' | 'completed' | 'sent';
 
+// A site inspection (form_type 'site_v1') stores its data as this shape inside
+// form_data: shared site fields plus one answers object per pump, keyed by the
+// pump schema id ('jockey' | 'diesel' | 'electrica').
+export interface SiteData {
+  cliente: string;
+  atencion: string;
+  area: string;
+  fecha: string;
+  tecnico: string;
+}
+
+export interface SiteFormData {
+  site: SiteData;
+  pumps: Record<string, Record<string, unknown>>;
+}
+
+// form_type / form_version for the multi-pump site inspection.
+export const SITE_FORM_TYPE = 'site_v1';
+export const SITE_FORM_VERSION = 1;
+
 export interface Inspection {
   id: string;
   form_type: string;

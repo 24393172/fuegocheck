@@ -42,11 +42,8 @@ export default function HistoryScreen() {
     filter === 'all' ? inspections : inspections.filter((i) => i.status === filter);
 
   function handlePress(inspection: InspectionListItem) {
-    if (inspection.status === 'draft') {
-      router.push(`/inspection/${inspection.id}/fill`);
-    } else {
-      router.push(`/inspection/${inspection.id}/pdf-preview`);
-    }
+    // All inspections open their index screen (the list of pumps + share).
+    router.push(`/inspection/${inspection.id}`);
   }
 
   return (

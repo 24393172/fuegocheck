@@ -10,38 +10,27 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useForm, FieldValues, useWatch } from 'react-hook-form';
-import { Inspection, Photo, Signature } from '../../../types/inspection.types';
-import { FormSchema, FormField as FormFieldType } from '../../../types/form.types';
-import {
-  getInspection,
-  updateInspection,
-  updateStatus,
-} from '../../../lib/repositories/inspections.repo';
+import { Inspection, Photo } from '../../../types/inspection.types';
+import { FormSchema } from '../../../types/form.types';
+import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
-import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
-import { getSchema } from '../../../schemas';
+import { parseFormData } from '../../../lib/form-data';
+import { PUMP_SCHEMAS } from '../../../schemas';
 import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
-import SignatureField from '../../../components/forms/SignatureField';
 import SectionHeader from '../../../components/ui/SectionHeader';
 
-// The pump form only has one signature: the technician. This map keeps the
-// renderer generic in case a client signature is ever added back.
-const SIGNER_TYPE_MAP: Record<string, 'technician' | 'client'> = {
-  firma_tecnico: 'technician',
-  firma_cliente: 'client',
-};
-
-function signerTypeForField(key: string): 'technician' | 'client' {
-  return SIGNER_TYPE_MAP[key] ?? (key.replace('signature_', '') as 'technician' | 'client');
+// Photos are stored per pump so they don't collide between the pumps of one
+// inspection: the field_key is prefixed with the pump id (e.g. "diesel:photo_general").
+function photoKey(pump: string, fieldKey: string): string {
+  return `${pump}:${fieldKey}`;
 }
 
 function computeProgress(
   schema: FormSchema,
   values: FieldValues,
-  photos: Record<string, Photo>,
-  signatures: Record<string, Signature>
+  photos: Record<string, Photo>
 ): { filled: number; total: number } {
   let total = 0;
   let filled = 0;
@@ -50,8 +39,6 @@ function computeProgress(
       total++;
       if (field.type === 'photo') {
         if (photos[field.key]) filled++;
-      } else if (field.type === 'signature') {
-        if (signatures[signerTypeForField(field.key)]) filled++;
       } else {
         const v = values[field.key];
         if (v !== undefined && v !== null && v !== '') filled++;
@@ -62,21 +49,19 @@ function computeProgress(
 }
 
 export default function FillScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, pump } = useLocalSearchParams<{ id: string; pump: string }>();
   const router = useRouter();
   const { isSaving, saveError, setIsSaving, setSaveError } = useInspectionStore();
 
-  const [inspection, setInspection] = useState<Inspection | null>(null);
   const [schema, setSchema] = useState<FormSchema | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isCompleting, setIsCompleting] = useState(false);
   const [photosByKey, setPhotosByKey] = useState<Record<string, Photo>>({});
-  const [signaturesByType, setSignaturesByType] = useState<Record<string, Signature>>({});
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Holds values not yet persisted, so leaving the screen mid-debounce can
-  // flush them instead of silently dropping the last change.
   const pendingValuesRef = useRef<FieldValues | null>(null);
+  // The full form_data (site + every pump). Autosave only replaces this pump's
+  // slice, so the other pumps and the site data are never overwritten.
+  const fullDataRef = useRef<Record<string, unknown>>({});
 
   const { control, watch, reset } = useForm<FieldValues>({ defaultValues: {} });
   const watchedValues = useWatch({ control });
@@ -84,32 +69,39 @@ export default function FillScreen() {
   useEffect(() => {
     async function load() {
       try {
-        const insp = await getInspection(id);
+        const s = PUMP_SCHEMAS.find((x) => x.id === pump) ?? null;
+        if (!s) {
+          Alert.alert('Error', 'Tipo de bomba no reconocido.');
+          router.back();
+          return;
+        }
+        const insp: Inspection | null = await getInspection(id);
         if (!insp) {
           Alert.alert('Error', 'No se encontró la inspección.');
           router.back();
           return;
         }
-        const s = getSchema(insp.form_type, insp.form_version);
-        if (!s) {
-          Alert.alert('Error', 'Tipo de formulario no reconocido.');
-          router.back();
-          return;
+
+        const fullData = parseFormData(insp);
+        if (!fullData.pumps || typeof fullData.pumps !== 'object') fullData.pumps = {};
+        fullDataRef.current = fullData;
+
+        const photos = await getPhotosByInspection(id);
+        const prefix = `${pump}:`;
+        const pumpPhotos: Record<string, Photo> = {};
+        for (const p of photos) {
+          if (p.field_key.startsWith(prefix)) {
+            pumpPhotos[p.field_key.slice(prefix.length)] = p;
+          }
         }
 
-        const [photos, signatures] = await Promise.all([
-          getPhotosByInspection(id),
-          getSignaturesByInspection(id),
-        ]);
-
-        setInspection(insp);
         setSchema(s);
-        setPhotosByKey(Object.fromEntries(photos.map((p) => [p.field_key, p])));
-        setSignaturesByType(Object.fromEntries(signatures.map((sig) => [sig.signer_type, sig])));
-        reset(JSON.parse(insp.form_data));
+        setPhotosByKey(pumpPhotos);
+        const pumps = fullData.pumps as Record<string, Record<string, unknown>>;
+        reset(pumps[pump] ?? {});
       } catch (error) {
-        console.error('[fill] Failed to load inspection:', error);
-        Alert.alert('Error', 'No se pudo cargar la inspección.');
+        console.error('[fill] Failed to load:', error);
+        Alert.alert('Error', 'No se pudo cargar la bomba.');
         router.back();
       } finally {
         setIsLoading(false);
@@ -117,10 +109,17 @@ export default function FillScreen() {
     }
 
     load();
-  }, [id]);
+  }, [id, pump]);
+
+  // Merges the current pump's values into the full form_data and persists it.
+  function persist(values: FieldValues): Promise<void> {
+    const pumps = (fullDataRef.current.pumps ?? {}) as Record<string, Record<string, unknown>>;
+    fullDataRef.current = { ...fullDataRef.current, pumps: { ...pumps, [pump]: values } };
+    return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });
+  }
 
   useEffect(() => {
-    if (!inspection) return;
+    if (!schema) return;
 
     const subscription = watch((values) => {
       pendingValuesRef.current = values;
@@ -129,12 +128,7 @@ export default function FillScreen() {
         try {
           setIsSaving(true);
           setSaveError(null);
-          await updateInspection(id, {
-            form_data: JSON.stringify(values),
-            client_name: (values['cliente'] as string) || inspection.client_name,
-            technician_name: (values['tecnico'] as string) || inspection.technician_name,
-          });
-          // Only clear if no newer keystroke replaced the pending values.
+          await persist(values);
           if (pendingValuesRef.current === values) pendingValuesRef.current = null;
         } catch (error) {
           console.error('[fill] Autosave failed:', error);
@@ -151,113 +145,19 @@ export default function FillScreen() {
       // Flush any unsaved changes so leaving the screen never loses data.
       const pending = pendingValuesRef.current;
       if (pending) {
-        updateInspection(id, {
-          form_data: JSON.stringify(pending),
-          client_name: (pending['cliente'] as string) || inspection.client_name,
-          technician_name: (pending['tecnico'] as string) || inspection.technician_name,
-        }).catch((error) => console.error('[fill] Flush on exit failed:', error));
+        persist(pending).catch((error) => console.error('[fill] Flush on exit failed:', error));
       }
     };
-  }, [inspection, id]);
+  }, [schema, id, pump]);
 
-  async function doComplete(currentValues: FieldValues): Promise<void> {
-    try {
-      setIsCompleting(true);
-
-      await updateInspection(id, {
-        form_data: JSON.stringify(currentValues),
-        client_name: (currentValues['cliente'] as string) || inspection!.client_name,
-        technician_name: (currentValues['tecnico'] as string) || inspection!.technician_name,
-      });
-      pendingValuesRef.current = null;
-
-      await updateStatus(id, 'completed');
-      router.push(`/inspection/${id}/pdf-preview`);
-    } catch (error) {
-      console.error('[fill] Failed to complete inspection:', error);
-      Alert.alert('Error', 'No se pudo completar la inspección. Intenta de nuevo.');
-    } finally {
-      setIsCompleting(false);
-    }
-  }
-
-  // Checks if a field is empty (handles photos, signatures, and normal fields).
-  function isFieldEmpty(field: FormFieldType, values: FieldValues): boolean {
-    if (field.type === 'photo') return !photosByKey[field.key];
-    if (field.type === 'signature') return !signaturesByType[signerTypeForField(field.key)];
-    const value = values[field.key];
-    return value === undefined || value === null || value === '';
-  }
-
-  async function handleComplete(): Promise<void> {
-    if (!schema || !inspection) return;
-
-    const currentValues = watch();
-    const criticalMissing: string[] = []; // required:true → blocks completion
-    const optionalMissing: string[] = [];  // required:false → soft warning only
-
-    for (const section of schema.sections) {
-      for (const field of section.fields) {
-        if (!isFieldEmpty(field, currentValues)) continue;
-        if (field.required) {
-          criticalMissing.push(field.label);
-        } else {
-          optionalMissing.push(field.label);
-        }
-      }
-    }
-
-    // Critical fields missing → hard block, cannot continue.
-    if (criticalMissing.length > 0) {
-      const listed = criticalMissing.map((l) => `• ${l}`).join('\n');
-      Alert.alert(
-        'Faltan campos obligatorios',
-        `Debes completar antes de enviar:\n\n${listed}`,
-        [{ text: 'Entendido', style: 'default' }]
-      );
-      return;
-    }
-
-    // Only optional fields missing → soft warning with option to continue.
-    if (optionalMissing.length > 0) {
-      const MAX_SHOWN = 6;
-      const listed = optionalMissing.slice(0, MAX_SHOWN).map((l) => `• ${l}`).join('\n');
-      const remainder =
-        optionalMissing.length > MAX_SHOWN
-          ? `\n...y ${optionalMissing.length - MAX_SHOWN} campo(s) más`
-          : '';
-
-      Alert.alert(
-        'Campos sin completar',
-        `${listed}${remainder}\n\n¿Deseas continuar de todas formas?`,
-        [
-          { text: 'Revisar', style: 'cancel' },
-          {
-            text: 'Continuar',
-            onPress: () => {
-              doComplete(currentValues).catch(console.error);
-            },
-          },
-        ]
-      );
-      return;
-    }
-
-    // Nothing missing — complete directly.
-    await doComplete(currentValues);
-  }
-
-  function renderField(field: FormFieldType) {
+  function renderField(field: FormSchema['sections'][number]['fields'][number]) {
     if (field.type === 'photo') {
       return (
         <View key={field.key} style={styles.mediaFieldWrapper}>
-          <Text style={styles.mediaLabel}>
-            {field.label}
-            {field.required && <Text style={styles.required}> *</Text>}
-          </Text>
+          <Text style={styles.mediaLabel}>{field.label}</Text>
           <PhotoField
             inspectionId={id}
-            fieldKey={field.key}
+            fieldKey={photoKey(pump, field.key)}
             label={field.label}
             photo={photosByKey[field.key] ?? null}
             onPhotoSaved={(photo) =>
@@ -267,34 +167,6 @@ export default function FillScreen() {
               setPhotosByKey((prev) => {
                 const next = { ...prev };
                 delete next[field.key];
-                return next;
-              })
-            }
-          />
-        </View>
-      );
-    }
-
-    if (field.type === 'signature') {
-      const signerType = signerTypeForField(field.key);
-      return (
-        <View key={field.key} style={styles.mediaFieldWrapper}>
-          <Text style={styles.mediaLabel}>
-            {field.label}
-            {field.required && <Text style={styles.required}> *</Text>}
-          </Text>
-          <SignatureField
-            inspectionId={id}
-            signerType={signerType}
-            label={field.label}
-            signature={signaturesByType[signerType] ?? null}
-            onSignatureSaved={(sig) =>
-              setSignaturesByType((prev) => ({ ...prev, [sig.signer_type]: sig }))
-            }
-            onSignatureCleared={() =>
-              setSignaturesByType((prev) => {
-                const next = { ...prev };
-                delete next[signerType];
                 return next;
               })
             }
@@ -314,15 +186,15 @@ export default function FillScreen() {
     );
   }
 
-  if (!inspection || !schema) return null;
+  if (!schema) return null;
 
-  const { filled, total } = computeProgress(schema, watchedValues, photosByKey, signaturesByType);
+  const { filled, total } = computeProgress(schema, watchedValues, photosByKey);
   const progressPct = total > 0 ? Math.round((filled / total) * 100) : 0;
 
   return (
     <View style={styles.container}>
-      {/* Progress header */}
       <View style={styles.progressContainer}>
+        <Text style={styles.pumpTitle}>{schema.name}</Text>
         <View style={styles.progressTrack}>
           <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
         </View>
@@ -347,14 +219,11 @@ export default function FillScreen() {
 
         <View style={styles.footer}>
           <TouchableOpacity
-            style={[styles.completeButton, isCompleting && styles.buttonDisabled]}
-            onPress={handleComplete}
-            disabled={isCompleting}
+            style={styles.doneButton}
+            onPress={() => router.back()}
             activeOpacity={0.8}
           >
-            <Text style={styles.completeButtonText}>
-              {isCompleting ? 'Guardando...' : 'Completar y Enviar'}
-            </Text>
+            <Text style={styles.doneButtonText}>Listo</Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -386,6 +255,11 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
     gap: 6,
+  },
+  pumpTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#1e3a5f',
   },
   progressTrack: {
     height: 6,
@@ -425,23 +299,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#374151',
   },
-  required: {
-    color: '#dc2626',
-  },
   footer: {
     padding: 20,
     paddingBottom: 40,
   },
-  completeButton: {
-    backgroundColor: '#16a34a',
+  doneButton: {
+    backgroundColor: '#1e3a5f',
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
   },
-  buttonDisabled: {
-    opacity: 0.6,
-  },
-  completeButtonText: {
+  doneButtonText: {
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',

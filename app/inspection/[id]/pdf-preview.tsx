@@ -21,7 +21,6 @@ import { getSignaturesByInspection } from '../../../lib/repositories/signatures.
 import { generateInspectionExcel } from '../../../lib/excel-generator';
 import { inspectionDate } from '../../../lib/form-data';
 import { loadSettings } from '../../../lib/settings-manager';
-import { getSchema } from '../../../schemas';
 import { Inspection, Photo, Signature } from '../../../types/inspection.types';
 import StatusBadge from '../../../components/ui/StatusBadge';
 
@@ -44,14 +43,13 @@ function buildEmailBody(
   photoCount: number,
   hasSignature: boolean
 ): string {
-  const schema = getSchema(inspection.form_type, inspection.form_version);
   const attachmentParts = ['el reporte en Excel'];
   if (photoCount > 0) attachmentParts.push(`${photoCount} foto(s) de evidencia`);
   if (hasSignature) attachmentParts.push('la firma');
 
   return [
     'Fuego & Seguridad',
-    schema?.name ?? 'Reporte de inspección',
+    'Reporte de inspección de bombas contra incendio',
     '',
     `Cliente: ${inspection.client_name}`,
     `Fecha: ${inspectionDate(inspection)}`,
@@ -252,6 +250,14 @@ export default function ShareScreen() {
         </Text>
       </TouchableOpacity>
 
+      <TouchableOpacity
+        style={styles.editButton}
+        onPress={() => router.replace(`/inspection/${id}`)}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.editButtonText}>Editar inspección</Text>
+      </TouchableOpacity>
+
       <TouchableOpacity style={styles.backButton} onPress={() => router.dismissAll()} activeOpacity={0.8}>
         <Text style={styles.backButtonText}>Volver al inicio</Text>
       </TouchableOpacity>
@@ -347,6 +353,19 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     fontWeight: '700',
+  },
+  editButton: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#1e3a5f',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  editButtonText: {
+    color: '#1e3a5f',
+    fontSize: 15,
+    fontWeight: '600',
   },
   backButton: {
     backgroundColor: '#ffffff',

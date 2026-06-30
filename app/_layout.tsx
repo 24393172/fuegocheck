@@ -121,6 +121,7 @@ export default function RootLayout() {
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="inspection/new" options={{ title: 'Nueva Inspección' }} />
+        <Stack.Screen name="inspection/[id]/index" options={{ title: 'Inspección' }} />
         <Stack.Screen name="inspection/[id]/fill" options={{ title: 'Inspección' }} />
         <Stack.Screen name="inspection/[id]/pdf-preview" options={{ title: 'Inspección' }} />
       </Stack>

@@ -3,12 +3,13 @@ import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ScrollView 
 import { useRouter } from 'expo-router';
 import { createInspection } from '../../lib/repositories/inspections.repo';
 import { loadSettings } from '../../lib/settings-manager';
-import { pumpFormV2 } from '../../schemas';
+import { SITE_FORM_TYPE, SITE_FORM_VERSION, SiteFormData } from '../../types/inspection.types';
 
 export default function NewInspectionScreen() {
   const router = useRouter();
   const [clientName, setClientName] = useState('');
-  const [location, setLocation] = useState('');
+  const [area, setArea] = useState('');
+  const [atencion, setAtencion] = useState('');
   const [technicianName, setTechnicianName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
 
@@ -23,8 +24,8 @@ export default function NewInspectionScreen() {
       Alert.alert('Campo requerido', 'Ingresa el nombre del cliente.');
       return;
     }
-    if (!location.trim()) {
-      Alert.alert('Campo requerido', 'Ingresa la dirección o ubicación.');
+    if (!area.trim()) {
+      Alert.alert('Campo requerido', 'Ingresa el área (ej. Cuarto de Máquinas).');
       return;
     }
     if (!technicianName.trim()) {
@@ -43,25 +44,30 @@ export default function NewInspectionScreen() {
         year: 'numeric',
       });
 
-      // Pre-fill the fields that new.tsx already knows at creation time.
-      // The rest are filled by the technician in fill.tsx.
-      const initialFormData = {
-        cliente: clientName.trim(),
-        fecha: today,
-        tecnico: technicianName.trim(),
+      // Site-level data is shared by every pump in the inspection. Each pump's
+      // answers are filled later in fill.tsx and stored under form_data.pumps.
+      const initialFormData: SiteFormData = {
+        site: {
+          cliente: clientName.trim(),
+          atencion: atencion.trim(),
+          area: area.trim(),
+          fecha: today,
+          tecnico: technicianName.trim(),
+        },
+        pumps: {},
       };
 
       const inspection = await createInspection({
-        form_type: pumpFormV2.id,
-        form_version: pumpFormV2.version,
+        form_type: SITE_FORM_TYPE,
+        form_version: SITE_FORM_VERSION,
         technician_name: technicianName.trim(),
         client_name: clientName.trim(),
-        location: location.trim(),
+        location: area.trim(),
         status: 'draft',
         form_data: JSON.stringify(initialFormData),
       });
 
-      router.replace(`/inspection/${inspection.id}/fill`);
+      router.replace(`/inspection/${inspection.id}`);
     } catch (error) {
       console.error('[new] Failed to create inspection:', error);
       Alert.alert('Error', 'No se pudo crear la inspección. Intenta de nuevo.');
@@ -72,7 +78,10 @@ export default function NewInspectionScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.formType}>Bomba de Combustión Interna Contra Incendios</Text>
+      <Text style={styles.formType}>Inspección de bombas contra incendio</Text>
+      <Text style={styles.hint}>
+        Captura los datos del sitio. Después elegirás qué bombas inspeccionar.
+      </Text>
 
       <View style={styles.field}>
         <Text style={styles.label}>Cliente <Text style={styles.required}>*</Text></Text>
@@ -87,14 +96,26 @@ export default function NewInspectionScreen() {
       </View>
 
       <View style={styles.field}>
-        <Text style={styles.label}>Dirección / Ubicación <Text style={styles.required}>*</Text></Text>
+        <Text style={styles.label}>Área <Text style={styles.required}>*</Text></Text>
         <TextInput
           style={styles.input}
-          value={location}
-          onChangeText={setLocation}
-          placeholder="Dirección o descripción del lugar"
+          value={area}
+          onChangeText={setArea}
+          placeholder="Ej. Cuarto de Máquinas"
           placeholderTextColor="#6b7280"
           autoCapitalize="sentences"
+        />
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Atención</Text>
+        <TextInput
+          style={styles.input}
+          value={atencion}
+          onChangeText={setAtencion}
+          placeholder="Ing. responsable (opcional)"
+          placeholderTextColor="#6b7280"
+          autoCapitalize="words"
         />
       </View>
 
@@ -125,7 +146,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: '#1e3a5f',
-    marginBottom: 8,
+  },
+  hint: {
+    fontSize: 13,
+    color: '#6b7280',
+    marginTop: -8,
   },
   field: {
     gap: 6,

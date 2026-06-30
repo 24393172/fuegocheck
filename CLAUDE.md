@@ -78,7 +78,7 @@ DEVICE
 -- inspections
 CREATE TABLE inspections (
   id TEXT PRIMARY KEY,              -- UUID v4
-  form_type TEXT NOT NULL,          -- 'pump_v2' | future form types
+  form_type TEXT NOT NULL,          -- 'site_v1' (site inspection with multiple pumps)
   form_version INTEGER NOT NULL,    -- schema version at time of creation
   technician_name TEXT NOT NULL,
   client_name TEXT NOT NULL,
@@ -152,26 +152,33 @@ interface FormSection {
 }
 
 interface FormSchema {
-  id: string            // e.g. 'pump_v2'
+  id: string            // e.g. 'jockey'
   name: string          // e.g. 'Reporte de Inspección ... Bomba'
   version: number       // increment when form structure changes
   sections: FormSection[]
 }
 ```
 
-The only form currently shipped is `pump_v2`. The old `pump_v1` schema was
-removed (no real inspections existed). `required: true` fields are blocking —
-the user cannot complete the inspection until they are filled (see fill.tsx).
-The date (`fecha`) is NOT a form field — it is set automatically at creation.
+An inspection is a **site visit** (`form_type 'site_v1'`) that can hold up to
+three pump schemas: `jockey`, `electrica`, `diesel` (registered in
+`schemas/index.ts` as `PUMP_SCHEMAS`). Each pump's answers live under
+`form_data.pumps.<bomba>`; shared data (cliente, área, fecha, técnico) under
+`form_data.site`. Checklist questions are `required: false`; the hard requirement
+(signature + at least one pump with data) is enforced in `inspection/[id]/index.tsx`.
+The date is NOT a form field — it is set automatically at creation.
 
-**Adding a new form type in the future:**
-1. Create `schemas/extinguisher-form.schema.ts` with same structure
-2. Register it in `schemas/index.ts`
-3. Done. Zero changes to renderer or database.
+Field extras for the Excel: `parametro` (fixed reference text, e.g. "NFPA 20") and
+`readingKeys` (the number fields that are a question's readings).
+
+**Adding a new pump type in the future:**
+1. Create `schemas/<name>-form.schema.ts` with the same structure
+2. Add it to `PUMP_SCHEMAS` in `schemas/index.ts`
+3. Done — index screen, renderer, DB and Excel pick it up automatically.
 
 **Why versioning matters:**
-If the physical paper form changes, bump to `pump_v3`. Inspections saved with
-`pump_v2` keep rendering because `form_version` is stored with each record.
+If a physical paper form changes, bump that pump schema's `version` and add a new
+schema. Inspections store the version they were created with, so old records keep
+rendering.
 
 ---
 
@@ -189,18 +196,21 @@ Delete photos when inspection is deleted
 
 ## Excel Output (lib/excel-generator.ts)
 
+`xlsx` is imported from its prebuilt bundle (`xlsx/dist/xlsx.full.min.js`); the
+package entry pulls Node modules Metro can't resolve in Expo Go.
+
 Two functions:
-- `generateInspectionExcel(id)` — single inspection, vertical layout (label | value).
-  Attached to the email. Named `inspeccion_{client}_{uuid8}.xlsx`.
-- `generateMasterExcel()` — ALL inspections, one row per inspection, one column
-  per field. Used by the "Exportar todo" button in Settings (shared via
-  expo-sharing). Named `inspecciones_{YYYY-MM-DD}.xlsx`.
+- `generateInspectionExcel(id)` — one inspection, **one sheet per pump that has
+  data**, in columns like the paper sheet (Pregunta · S · N/A · N · Parámetros ·
+  Lecturas · Comentarios) with an "X" under the chosen answer. Named
+  `inspeccion_{client}_{uuid8}.xlsx`.
+- `generateMasterExcel()` — ALL inspections, one sheet per pump type, one row per
+  inspection. Used by "Exportar todo" in Settings (shared via expo-sharing).
 
 Shared rules:
-- `number` fields are written as real numbers (so the secretary can sum/average).
-- yes_no_na values: "Sí" / "No" / "N/A".
 - Photos and signatures are NOT in the Excel (sent as separate attachments).
 - form_data is parsed defensively — a corrupted record becomes {} instead of crashing.
+- Cell borders/bold are NOT written (SheetJS community limitation); columns + X only.
 
 ---
 
@@ -250,11 +260,11 @@ Every critical operation must handle failure explicitly:
     history.tsx            # Full inspection history with filters
     settings.tsx           # Tech name, email config, app version
   /inspection/
-    new.tsx                # Choose form type
+    new.tsx                # Create site inspection (client + area + attention)
     [id]/
-      fill.tsx             # Fill out the form
-      preview.tsx          # Review before completing
-      pdf-preview.tsx      # Share screen: generates Excel, opens Gmail
+      index.tsx            # Pump list + signature + complete/send
+      fill.tsx             # Fill ONE pump (?pump=)
+      pdf-preview.tsx      # Share screen: generates Excel, opens Gmail (legacy name)
   _layout.tsx
 /components
   /forms/
@@ -276,8 +286,10 @@ Every critical operation must handle failure explicitly:
   photo-manager.ts         # compress, save, delete photos
   uuid.ts
 /schemas
-  pump-form.schema.ts
-  index.ts                 # Registry of all form schemas
+  jockey-form.schema.ts
+  electrica-form.schema.ts
+  diesel-form.schema.ts
+  index.ts                 # PUMP_SCHEMAS registry + getSchema()
 /store
   inspection.store.ts      # Active inspection being filled
 /types

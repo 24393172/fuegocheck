@@ -25,9 +25,9 @@
 - **Cómo:** crear `getInspectionsForList()` que haga `SELECT id, client_name, location, technician_name, status, created_at FROM inspections ORDER BY created_at DESC`. Reservar `SELECT *` para cuando se abre una inspección concreta.
 
 **3. `xlsx` se incluye en el bundle aunque solo se use al exportar/compartir**
-- **Dónde:** `import * as XLSX from 'xlsx'` en `lib/excel-generator.ts:1`.
-- **Por qué:** SheetJS es una librería pesada (cientos de KB). Se carga al iniciar la app aunque el técnico genere Excel solo al final del flujo.
-- **Cómo:** import dinámico — `const XLSX = await import('xlsx')` dentro de las funciones de generación. Reduce el tiempo de arranque.
+- **Dónde:** `import * as XLSX from 'xlsx/dist/xlsx.full.min.js'` en `lib/excel-generator.ts`.
+- **Por qué:** SheetJS es pesada (cientos de KB) y se carga al iniciar la app.
+- **Estado:** se probó el import dinámico (`await import('xlsx')`) pero **rompe en Expo Go** ("Requiring unknown module 1766"); se descartó. Queda como import estático del bundle `dist` (autocontenido). El costo de arranque es el precio de que funcione en Expo Go y APK. **No reintroducir el `await import`.**
 
 **4. Las firmas se previsualizan desde un data-URI base64 grande**
 - **Dónde:** `components/forms/SignatureField.tsx:95` (`source={{ uri: signature.image_base64 }}`) y `pdf-preview` (email body embebe el base64 completo).
@@ -36,10 +36,10 @@
 
 ### UX/UI
 
-**5. La inspección creada no permite corregir la ubicación**
-- **Dónde:** `app/inspection/new.tsx` captura `location`, pero `schemas/pump-form.schema.ts` (pump_v2) no tiene ningún campo de ubicación.
-- **Por qué:** si el técnico se equivoca en la dirección, no hay forma de corregirla en la app. Queda mal en el Excel y el correo para siempre.
-- **Cómo:** agregar campo `ubicacion` al schema (que se pre-llene desde `location`) o una pantalla de edición. (Pendiente por decisión del cliente.)
+**5. El área/sitio no es editable después de crear la inspección**
+- **Dónde:** `app/inspection/new.tsx` captura cliente + área + atención en `form_data.site`; no hay pantalla para editarlos después.
+- **Por qué:** si el técnico se equivoca, no puede corregirlo en la app y queda mal en el Excel.
+- **Cómo:** una pantalla de edición de los datos del sitio (o campos editables en el índice). (Pendiente.)
 
 **6. Si el autosave falla, el usuario nunca se entera**
 - **Dónde:** `app/inspection/[id]/fill.tsx` llama `setSaveError(...)` en el catch del autosave, pero `saveError` **no se renderiza en ninguna parte**. Solo se muestra el badge `isSaving`.
@@ -213,7 +213,7 @@ vez de "todo", y una política de archivado/borrado de inspecciones antiguas.
 | QW5 | **`constants/colors.ts`** y reemplazar `#1e3a5f`. | nuevo + varios | S |
 | QW6 | ✅ HECHO — **Lista con columnas selectivas** (`getInspectionsForList` + `getInspectionCounts`, tipo `InspectionListItem`). | `inspections.repo.ts` | S |
 | QW7 | **Versión desde `expo-constants`** (eliminar duplicado). | `config.ts`, `settings.tsx` | S |
-| QW8 | ✅ HECHO — **Lazy import de `xlsx`**. | `excel-generator.ts` | S |
+| QW8 | ⚠️ REVERTIDO — el lazy import (`await import('xlsx')`) rompía en Expo Go ("unknown module 1766"). Ahora `xlsx` se importa **estático** desde `dist/xlsx.full.min.js`. No reintroducir el `await import`. | `excel-generator.ts` | — |
 | QW9 | **Renombrar `pdf-preview.tsx` → `share.tsx`** (+3 referencias). | varios | S |
 | QW10 | **Mostrar la fecha (solo lectura)** en el encabezado del formulario. | `fill.tsx` | S |
 | QW11 | **Helper único `si/no/na`** y reutilizarlo. | nuevo + 3 archivos | S |
