@@ -28,9 +28,9 @@ async function getInspectionById(id) { ... }
 ## File naming
 
 - Components: `PascalCase.tsx` → `InspectionCard.tsx`
-- Utilities / libs: `kebab-case.ts` → `pdf-generator.ts`
+- Utilities / libs: `kebab-case.ts` → `excel-generator.ts`
 - Repositories: `kebab-case.repo.ts` → `inspections.repo.ts`
-- Schemas: `kebab-case.schema.ts` → `pump-form.schema.ts`
+- Schemas: `kebab-case.schema.ts` → `jockey-form.schema.ts`
 - Types: `kebab-case.types.ts` → `inspection.types.ts`
 - Screens (Expo Router): `kebab-case.tsx` → `fill.tsx`
 
@@ -85,15 +85,15 @@ class InspectionRepository {
 ```typescript
 // ✅ Good
 try {
-  await generatePDF(inspection)
+  await generateInspectionExcel(inspection.id)
 } catch (error) {
-  console.error('[pdf-generator] Failed to generate PDF:', error)
-  showErrorToast('No se pudo generar el PDF. Intenta de nuevo.')
+  console.error('[excel-generator] Failed to generate Excel:', error)
+  showErrorToast('No se pudo generar el Excel. Intenta de nuevo.')
 }
 
 // ❌ Bad
 try {
-  await generatePDF(inspection)
+  await generateInspectionExcel(inspection.id)
 } catch {}
 ```
 

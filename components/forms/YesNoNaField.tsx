@@ -50,7 +50,10 @@ const styles = StyleSheet.create({
   },
   button: {
     flex: 1,
-    paddingVertical: 10,
+    // Tall tap target (~52px) for comfortable taps with gloves or in a hurry.
+    paddingVertical: 15,
+    minHeight: 52,
+    justifyContent: 'center',
     borderRadius: 6,
     // Constant width 2 so selecting doesn't shift the layout by a pixel.
     borderWidth: 2,

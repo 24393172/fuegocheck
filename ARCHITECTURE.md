@@ -82,16 +82,15 @@ export async function deleteInspectionCompletely(id: string): Promise<void> { ..
 
 **Implementation:**
 ```typescript
-// form_data column contains (real pump_v2 keys; yes_no_na values are lowercase):
+// form_data shape for a site inspection (form_type 'site_v1'); yes_no_na lowercase:
 {
-  "cliente": "Hotel Caribe",
-  "fecha": "08/06/2026",
-  "tecnico": "Juan Pérez",
-  "1_1": "si",
-  "3_2_presion_arranque": 145,
-  "3_9": "no",
-  "3_9_comentario": "Vibración leve en arranque",
-  "observaciones": "Equipo operativo, se recomienda seguimiento"
+  "site": { "cliente": "Hotel Caribe", "fecha": "08/06/2026", "tecnico": "Juan Pérez",
+            "area": "Cuarto de Máquinas", "atencion": "Ing. Luis" },
+  "pumps": {
+    "jockey": { "1_1": "si", "3_2_presion_arranque": 145, "3_9": "no",
+                "3_9_comentario": "Vibración leve", "observaciones": "Equipo operativo" },
+    "diesel": { "2_3_banco_1": 14, "2_3_banco_2": 13 }
+  }
 }
 ```
 
@@ -116,9 +115,12 @@ export async function deleteInspectionCompletely(id: string): Promise<void> { ..
 2. Add to `schemas/index.ts` registry
 3. Done. Renderer, DB, and Excel generator all work automatically.
 
-**Note:** The old `pump_v1` schema was removed (no real inspections existed).
-Only `pump_v2` ships today. If the paper form changes, create `pump_v3` — never
-edit the `key`s of an existing schema (they are the JSON keys in `form_data`).
+**Current forms:** an inspection is a site visit (`form_type 'site_v1'`) holding
+up to three pump schemas — `jockey`, `electrica`, `diesel` (in `schemas/`,
+registered as `PUMP_SCHEMAS`). The legacy single-pump `pump_v2`/`pump_v1` schemas
+were removed (no real inspections existed). If a paper form changes, bump that
+pump's `version` and add a new schema — never edit the `key`s of a schema that has
+saved data (they are the JSON keys in `form_data.pumps.<bomba>`).
 
 ---
 
@@ -163,7 +165,14 @@ attached, instead of auto-sending via EmailJS.
 - The mail composer is **not** opened automatically — there is an explicit
   "Compartir por correo" button plus a confirmation dialog (avoids accidental
   sends when only viewing an inspection).
-- Temp files (Excel + signature PNGs) are deleted after the composer opens.
+- Generated files (Excel + signature PNGs) **persist** after the composer opens —
+  Gmail re-reads them in the background when actually sending; deleting them early
+  strands the email in drafts. They are removed on inspection delete and pruned at
+  startup after 3 days (`lib/attachment-files.ts`).
+- The Excel has **one sheet per pump** that has data, laid out in columns like the
+  paper sheet. `xlsx` is imported from its prebuilt bundle
+  (`xlsx/dist/xlsx.full.min.js`); the package entry pulls Node modules Metro can't
+  resolve in Expo Go.
 
 **Trade-offs accepted:**
 - Sending is manual (one extra tap). Acceptable — it also prevents accidental sends.
@@ -217,15 +226,14 @@ Each exports typed async functions. That's it.
 ### Zustand for UI state only
 The store (`store/inspection.store.ts`) holds only `isSaving` and `saveError`
 flags for the fill screen. It does NOT replace SQLite — SQLite is the source of
-truth. (Note: `saveError` is set on autosave failure but is not yet rendered in
-the UI — see IMPROVEMENT_AUDIT QW1.)
+truth. `saveError` is rendered as a red banner in `fill.tsx` on autosave failure.
 
 ### Expo Router file-based navigation
 Convention > configuration. File path = route. No route registry to maintain.
 
 ### Form validation is manual (Zod is installed but not used for the form)
-`zod` is a dependency but the pump form is **not** validated with it. Validation
-lives in `app/inspection/[id]/fill.tsx`: fields with `required: true` in the
-schema (cliente, técnico, firma) block completion; everything else triggers a
-soft "continue anyway" warning. react-hook-form manages field state and autosave.
-If a real Zod schema is added later, it should map 1:1 to the form schema.
+`zod` is a dependency but the forms are **not** validated with it. Validation
+lives in `app/inspection/[id]/index.tsx`: sending requires a signature plus at
+least one pump with data, and warns (soft, "send anyway") if a started pump has
+unanswered questions. Each pump's checklist questions are `required: false`.
+react-hook-form manages field state and autosave per pump in `fill.tsx`.

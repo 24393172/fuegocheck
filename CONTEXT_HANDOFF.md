@@ -13,13 +13,16 @@ la empresa **Fuego y Seguridad**. Reemplaza los formularios de papel por
 inspecciones digitales.
 
 **Flujo del técnico:**
-1. Crea una inspección (cliente + ubicación; el técnico se toma de Ajustes).
-2. Llena el formulario de bomba contra incendio (~90 campos en 6 secciones).
-3. Toma fotos de evidencia y captura su firma.
-4. Toca "Completar y Enviar" → validación de campos obligatorios.
-5. Llega a la pantalla de detalle → toca "Compartir por correo" → confirma.
-6. Se abre Gmail con el **Excel + fotos + firma adjuntos** y el destinatario
-   ya puesto. El técnico solo toca Enviar.
+1. Crea una inspección del **sitio** (cliente + área + atención; el técnico y la
+   fecha se toman solos).
+2. En la pantalla índice elige qué **bomba** llenar: Jockey, Diésel o Eléctrica.
+   Puede llenar varias, salir a medias y volver — cada bomba se guarda sola.
+3. Toma una foto por bomba (opcional) y captura **una firma** para toda la visita.
+4. Toca "Completar y Enviar" → valida firma + al menos una bomba con datos (avisa
+   si alguna bomba quedó incompleta).
+5. Llega a la pantalla de detalle → "Compartir por correo" → confirma (o "Editar").
+6. Se abre Gmail con el **Excel (una hoja por bomba) + fotos + firma adjuntos** y
+   el destinatario ya puesto. El técnico solo toca Enviar.
 
 **Importante:** Es un proyecto de servicio social universitario. 4 meses, 2
 desarrolladores junior. La meta es una app **estable y mantenible**, no un
@@ -57,11 +60,15 @@ remota. Todo es local en el dispositivo. La sincronización ES el correo.
 ## 3. Estado actual
 
 ### ✅ Funciona (verificado: type check limpio + bundle de producción OK)
-- Crear / editar / autosave de inspecciones (SQLite local).
-- Formulario dinámico `pump_v2` con barra de progreso en tiempo real.
-- Captura de fotos (comprimidas a 800px/70%) y firma táctil.
-- Validación bloqueante de campos obligatorios (cliente, técnico, firma).
-- Generación de Excel individual (vertical) y maestro (una fila por inspección).
+- Crear / editar / autosave de inspecciones de sitio (SQLite local).
+- Inspección de **sitio con 3 bombas** (Jockey, Diésel, Eléctrica): pantalla
+  índice + un formulario dinámico por bomba con barra de progreso.
+- Captura de fotos por bomba (comprimidas a 800px/70%) y una firma por inspección.
+- Validación: firma + al menos una bomba con datos; aviso suave si hay bombas
+  incompletas.
+- Excel individual con **una hoja por bomba**, en columnas como la hoja física
+  (Pregunta · S · N/A · N · Parámetros · Lecturas · Comentarios). Maestro: una
+  hoja por tipo de bomba.
 - Pantalla de detalle: ver datos, compartir por correo (con confirmación),
   reenviar y eliminar inspección (con limpieza de archivos en disco).
 - Exportar todas las inspecciones a un Excel desde Ajustes (expo-sharing).
@@ -75,9 +82,9 @@ remota. Todo es local en el dispositivo. La sincronización ES el correo.
 - **Date-picker**: no se construyó; la fecha es 100% automática (decisión del cliente).
 
 ### ⚠️ Limitaciones conocidas (por decisión, no bugs)
-- **Ubicación no editable** después de crear la inspección. El formulario
-  `pump_v2` no tiene campo de ubicación; vive solo en la columna `location`
-  poblada en `new.tsx`. El cliente eligió no agregar pantalla de edición.
+- **Datos del sitio no editables** después de crear la inspección. Cliente, área
+  y atención se capturan en `new.tsx` y se guardan en `form_data.site`; no hay
+  pantalla para corregirlos luego. El cliente eligió no agregar edición.
 - **Correo destinatario configurable en Ajustes** (desde 2026-06-12). El valor
   de `constants/config.ts` es solo el default inicial; el vigente vive en
   `settings.json` (`lib/settings-manager.ts`) y se edita en la pestaña Ajustes.
@@ -110,10 +117,11 @@ app/                              # Rutas (Expo Router, file-based)
     history.tsx                   # Historial con filtros por estado
     settings.tsx                  # Nombre técnico + "Exportar todo a Excel"
   inspection/
-    new.tsx                       # Crear inspección (cliente + ubicación)
+    new.tsx                       # Crear inspección del sitio (cliente + área + atención)
     [id]/
-      fill.tsx                    # ⭐ Formulario: autosave, progreso, validación
-      pdf-preview.tsx             # ⭐ Pantalla de detalle/compartir (NOMBRE OBSOLETO)
+      index.tsx                   # ⭐ Índice: las 3 bombas + firma + completar/enviar
+      fill.tsx                    # ⭐ Llenar UNA bomba (?pump=): autosave, progreso
+      pdf-preview.tsx             # ⭐ Detalle/compartir + "Editar" (NOMBRE OBSOLETO)
 
 components/
   forms/
@@ -138,8 +146,10 @@ lib/
     signatures.repo.ts           # CRUD de firmas
 
 schemas/
-  pump-form.schema.ts            # ⭐ Definición del formulario pump_v2 (única fuente)
-  index.ts                       # Registro de schemas + getSchema()
+  jockey-form.schema.ts          # ⭐ Bomba Jockey
+  electrica-form.schema.ts       # ⭐ Bomba Eléctrica
+  diesel-form.schema.ts          # ⭐ Bomba de Combustión Interna Diésel
+  index.ts                       # Registro (PUMP_SCHEMAS) + getSchema()
 
 store/
   inspection.store.ts            # Zustand: estado de guardado (isSaving, saveError)
@@ -163,8 +173,8 @@ Tres tablas en `fuego_seguridad.db` (ver `lib/db.ts`):
 ```sql
 inspections(
   id TEXT PK,              -- UUID v4
-  form_type TEXT,          -- siempre 'pump_v2' por ahora
-  form_version INTEGER,    -- 2
+  form_type TEXT,          -- 'site_v1' (inspección de sitio con varias bombas)
+  form_version INTEGER,    -- 1
   technician_name TEXT,
   client_name TEXT,
   location TEXT,
@@ -178,6 +188,12 @@ inspections(
 photos(id PK, inspection_id, field_key, local_uri, thumbnail_uri, caption, created_at)
 signatures(id PK, inspection_id, signer_type, image_base64, signed_at)
 ```
+
+**Forma del `form_data`** (inspección de sitio):
+`{ "site": { cliente, atencion, area, fecha, tecnico }, "pumps": { "jockey": {…}, "diesel": {…}, "electrica": {…} } }`
+Cada bomba guarda sus respuestas bajo su id. Las fotos usan `field_key` prefijado
+por bomba (ej. `diesel:photo_general`); la firma es única por inspección
+(`signer_type = 'technician'`). Tipos en `types/inspection.types.ts` (`SiteFormData`).
 
 **Por qué `form_data` es un JSON blob:** evita migraciones de BD cada vez que
 cambia el formulario. Los campos buscables (cliente, técnico, estado, fecha) son
@@ -201,6 +217,10 @@ columnas reales. Las inspecciones viejas siguen legibles tras cambiar el schema.
 | **Validación con `required: true`** | `cliente`, `tecnico` y `firma_tecnico` son bloqueantes; el resto es warning suave. |
 | **Sin ORM** | SQL directo con repositorios tipados. Menos dependencias, más legible para juniors. |
 | **form_data como JSON** | Evita migraciones. Ver sección 5. |
+| **Inspección = sitio con 3 bombas** | Un técnico revisa Jockey/Diésel/Eléctrica en la misma visita; antes era 1 bomba = 1 inspección. `form_data` lleva `site` + `pumps`. |
+| **Firma única por inspección** | Las 3 bombas están en el mismo cuarto de máquinas; firmar 3 veces es incómodo. Se captura una vez en el índice. |
+| **Excel en columnas, 1 hoja por bomba** | Réplica de la hoja física; cada bomba llenada es una hoja del mismo archivo. |
+| **xlsx desde `dist/xlsx.full.min.js`** | El entry normal hace `require('fs'/'crypto'/'stream')` y Metro/Expo Go no lo resuelve. El dist es autocontenido. NO volver a `import 'xlsx'` ni a `await import`. |
 
 ---
 
@@ -215,20 +235,23 @@ columnas reales. Las inspecciones viejas siguen legibles tras cambiar el schema.
 | **Versiones de paquetes** | RESUELTO 2026-06-12: `npx expo install --fix` aplicado (expo 54.0.35, router 6.0.24, file-system 19.0.23). |
 | **`react-native-worklets` era un stub local** | RESUELTO 2026-06-12: el stub (solo JS, sin código nativo) hacía fallar el build de Gradle en EAS. Se eliminó `stubs/` y se instaló el paquete real `react-native-worklets@0.5.1` (la misma versión nativa que trae Expo Go SDK 54). Se quitó `worklets: false` de `babel.config.js` y se activó `newArchEnabled: true` en app.json (reanimated 4 la requiere; Expo Go ya corría así). |
 | **`npm install` falla con ERESOLVE** | Conflicto preexistente react 19.1.0 vs react-dom 19.2.x transitivo. Resuelto con `.npmrc` (`legacy-peer-deps=true`) — necesario también para que EAS Build instale en sus servidores. No borrar ese archivo. |
+| **"Requiring unknown module 1766" al generar Excel** | El entry de `xlsx` (`xlsx.js`) hace `require` de módulos de Node (fs/crypto/stream) que no existen en Hermes; en Expo Go Metro lo marca como módulo desconocido. Fix: importar `xlsx/dist/xlsx.full.min.js` (autocontenido) + su `.d.ts` en `types/xlsx-dist.d.ts`. |
 
 ---
 
 ## 8. Próximos pasos (en orden de prioridad)
 
-> **ESTADO VIVO (2026-06-12, fin de sesión):** se llevan 4 builds de EAS. El
-> ÚLTIMO APK a probar es el build `f1111aa6` →
-> https://expo.dev/artifacts/eas/0_cvAFTJ-bHXEos0MlwiqxrcP2zHeP0xpaWP_zhIw98.apk
-> Incluye el parche de adjuntos + el fix de "se queda en borradores" (los
-> archivos Excel/firma ya no se borran al compartir). **Falta que Héctor
-> confirme que el correo SÍ se envía (sale de Borradores) y llega con Excel +
-> foto + firma.** Si llega completo, el flujo crítico queda cerrado.
-> ⚠️ TODO el trabajo de 2026-06-11/12 está SIN COMMITEAR en git (working tree,
-> rama `main`, único commit es "Initial commit"). Commitear cuanto antes.
+> **ESTADO VIVO (2026-06-29):** Implementado el cambio a **inspección de sitio
+> con 3 bombas** (Jockey/Diésel/Eléctrica) + **Excel en columnas, una hoja por
+> bomba**. Probado en Expo Go: crear, llenar varias bombas, firmar y generar el
+> Excel funcionan (tras el fix de xlsx → `dist/xlsx.full.min.js`). **Falta:**
+> probar el correo con adjuntos en **APK** y hacer push a git. Mejoras de esta
+> sesión: botones Sí/No/N/A más grandes, aviso de bombas incompletas al enviar,
+> botón "Editar" en la pantalla de envío. Pendientes anotados (no bloqueantes):
+> firma como archivo PNG, bordes/cuadrícula en el Excel (requiere otra librería),
+> renombrar `pdf-preview`→`share`.
+> ⚠️ El parche de adjuntos (`patches/expo-mail-composer`) y el `.npmrc` siguen
+> siendo necesarios; no borrarlos.
 
 1. **VERIFICAR el APK `f1111aa6`** (link arriba): instalar, compartir una
    inspección con foto+firma, tocar Enviar en Gmail, confirmar que sale de
@@ -298,9 +321,10 @@ calidad automatizado es `tsc --noEmit`.
 
 ## 10. Qué NO tocar (y por qué)
 
-- **Los `key` de los campos en `pump-form.schema.ts`**: son las claves del JSON
-  `form_data`. Cambiarlos rompe la lectura de inspecciones ya guardadas. Si el
-  formulario cambia de estructura, crear `pump_v3`, no editar `pump_v2`.
+- **Los `key` de los campos en los schemas de bomba** (`jockey/electrica/diesel-form.schema.ts`):
+  son las claves del JSON `form_data.pumps.<bomba>`. Cambiarlos rompe la lectura de
+  inspecciones ya guardadas. Si un formulario cambia, bumpear la `version` de esa
+  bomba y agregar un schema nuevo, no editar las keys existentes.
 - **`.npmrc`**: contiene `legacy-peer-deps=true`. Borrarlo rompe `npm install`
   local y el build de EAS.
 - **El nombre del archivo `pdf-preview.tsx`**: ya no genera PDF (es la pantalla
