@@ -49,13 +49,14 @@ function computeProgress(
 }
 
 export default function FillScreen() {
-  const { id, pump } = useLocalSearchParams<{ id: string; pump: string }>();
+  const { id, pump, readonly } = useLocalSearchParams<{ id: string; pump: string; readonly?: string }>();
   const router = useRouter();
   const { isSaving, saveError, setIsSaving, setSaveError } = useInspectionStore();
 
   const [schema, setSchema] = useState<FormSchema | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [photosByKey, setPhotosByKey] = useState<Record<string, Photo>>({});
+  const [isReadOnly, setIsReadOnly] = useState(readonly === '1');
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingValuesRef = useRef<FieldValues | null>(null);
@@ -83,6 +84,7 @@ export default function FillScreen() {
         }
 
         const fullData = parseFormData(insp);
+        setIsReadOnly(readonly === '1' || insp.status === 'completed' || insp.status === 'sent');
         if (!fullData.pumps || typeof fullData.pumps !== 'object') fullData.pumps = {};
         fullDataRef.current = fullData;
 
@@ -119,7 +121,7 @@ export default function FillScreen() {
   }
 
   useEffect(() => {
-    if (!schema) return;
+    if (!schema || isReadOnly) return;
 
     const subscription = watch((values) => {
       pendingValuesRef.current = values;
@@ -148,7 +150,7 @@ export default function FillScreen() {
         persist(pending).catch((error) => console.error('[fill] Flush on exit failed:', error));
       }
     };
-  }, [schema, id, pump]);
+  }, [schema, id, pump, isReadOnly]);
 
   function renderField(field: FormSchema['sections'][number]['fields'][number]) {
     if (field.type === 'photo') {
@@ -170,12 +172,13 @@ export default function FillScreen() {
                 return next;
               })
             }
+            readOnly={isReadOnly}
           />
         </View>
       );
     }
 
-    return <FormField key={field.key} field={field} control={control} />;
+    return <FormField key={field.key} field={field} control={control} readOnly={isReadOnly} />;
   }
 
   if (isLoading) {
@@ -201,6 +204,7 @@ export default function FillScreen() {
         <Text style={styles.progressText}>
           {filled} / {total} campos{progressPct === 100 ? ' ✓' : ''}
         </Text>
+        {isReadOnly && <Text style={styles.readOnlyText}>Vista de solo lectura</Text>}
       </View>
 
       {saveError && (
@@ -278,6 +282,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'right',
   },
+  readOnlyText: { fontSize: 12, color: '#92400e', fontWeight: '600' },
   saveErrorBanner: {
     backgroundColor: '#dc2626',
     paddingHorizontal: 16,

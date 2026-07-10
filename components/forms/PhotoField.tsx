@@ -21,6 +21,7 @@ interface Props {
   photo: Photo | null;
   onPhotoSaved: (photo: Photo) => void;
   onPhotoDeleted: () => void;
+  readOnly?: boolean;
 }
 
 export default function PhotoField({
@@ -30,6 +31,7 @@ export default function PhotoField({
   photo,
   onPhotoSaved,
   onPhotoDeleted,
+  readOnly = false,
 }: Props) {
   const [isCapturing, setIsCapturing] = useState(false);
 
@@ -113,13 +115,14 @@ export default function PhotoField({
     return (
       <View style={styles.photoContainer}>
         <Image source={{ uri: photo.thumbnail_uri ?? photo.local_uri }} style={styles.thumbnail} />
-        <TouchableOpacity style={styles.deleteButton} onPress={handleDelete} activeOpacity={0.7}>
+        {!readOnly && <TouchableOpacity style={styles.deleteButton} onPress={handleDelete} activeOpacity={0.7}>
           <Text style={styles.deleteText}>Eliminar</Text>
-        </TouchableOpacity>
+        </TouchableOpacity>}
       </View>
     );
   }
 
+  if (readOnly) return <Text style={styles.loadingText}>Sin fotografía</Text>;
   return (
     <TouchableOpacity style={styles.addButton} onPress={requestAndLaunchCamera} activeOpacity={0.7}>
       <Text style={styles.addIcon}>📷</Text>

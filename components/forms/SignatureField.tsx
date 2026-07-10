@@ -20,6 +20,7 @@ interface Props {
   signature: Signature | null;
   onSignatureSaved: (signature: Signature) => void;
   onSignatureCleared: () => void;
+  readOnly?: boolean;
 }
 
 export default function SignatureField({
@@ -29,6 +30,7 @@ export default function SignatureField({
   signature,
   onSignatureSaved,
   onSignatureCleared,
+  readOnly = false,
 }: Props) {
   const ref = useRef<SignatureViewRef>(null);
   const [isCapturing, setIsCapturing] = useState(false);
@@ -96,7 +98,7 @@ export default function SignatureField({
             style={styles.signatureImage}
             resizeMode="contain"
           />
-          <View style={styles.signatureActions}>
+          {!readOnly && <View style={styles.signatureActions}>
             <TouchableOpacity
               style={styles.secondaryButton}
               onPress={() => setModalVisible(true)}
@@ -107,8 +109,10 @@ export default function SignatureField({
             <TouchableOpacity style={styles.deleteButton} onPress={handleDelete} activeOpacity={0.7}>
               <Text style={styles.deleteText}>Eliminar</Text>
             </TouchableOpacity>
-          </View>
+          </View>}
         </View>
+      ) : readOnly ? (
+        <Text style={styles.addSubtext}>Sin firma registrada</Text>
       ) : (
         <TouchableOpacity
           style={styles.addButton}

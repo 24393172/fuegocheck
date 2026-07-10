@@ -115,6 +115,7 @@ export default function NewInspectionScreen() {
         client_name: clientName.trim(),
         location: area.trim(),
         status: 'draft',
+        pending_comment: null,
         form_data: JSON.stringify(initialFormData),
       });
 

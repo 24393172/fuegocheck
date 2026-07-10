@@ -5,6 +5,7 @@ export type YesNoNaValue = 'si' | 'no' | 'na' | null;
 interface Props {
   value: YesNoNaValue;
   onChange: (value: YesNoNaValue) => void;
+  disabled?: boolean;
 }
 
 // Icons stay visible on every state so the selection is never communicated by
@@ -15,7 +16,7 @@ const OPTIONS: { value: YesNoNaValue; label: string; icon: string; color: string
   { value: 'na', label: 'N/A', icon: '', color: '#6b7280' },
 ];
 
-export default function YesNoNaField({ value, onChange }: Props) {
+export default function YesNoNaField({ value, onChange, disabled = false }: Props) {
   return (
     <View style={styles.row}>
       {OPTIONS.map((opt) => {
@@ -28,10 +29,11 @@ export default function YesNoNaField({ value, onChange }: Props) {
               isSelected && { backgroundColor: opt.color, borderColor: opt.color },
             ]}
             onPress={() => onChange(isSelected ? null : opt.value)}
+            disabled={disabled}
             activeOpacity={0.7}
             accessibilityRole="button"
             accessibilityLabel={opt.label}
-            accessibilityState={{ selected: isSelected }}
+            accessibilityState={{ selected: isSelected, disabled }}
           >
             <Text style={[styles.label, isSelected && styles.labelSelected]}>
               {opt.icon ? `${opt.icon} ${opt.label}` : opt.label}

@@ -1,4 +1,4 @@
-export type InspectionStatus = 'draft' | 'completed' | 'sent';
+export type InspectionStatus = 'draft' | 'pending' | 'completed' | 'sent';
 
 // A site inspection (form_type 'site_v1') stores its data as this shape inside
 // form_data: shared site fields plus one answers object per pump, keyed by the
@@ -29,6 +29,7 @@ export interface Inspection {
   client_name: string;
   location: string;
   status: InspectionStatus;
+  pending_comment: string | null;
   form_data: string;
   created_at: number;
   updated_at: number;
@@ -43,6 +44,7 @@ export interface InspectionListItem {
   client_name: string;
   location: string;
   status: InspectionStatus;
+  pending_comment: string | null;
   created_at: number;
 }
 

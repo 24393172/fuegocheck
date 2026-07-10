@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  TextInput,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { Inspection, Signature } from '../../../types/inspection.types';
@@ -54,6 +55,7 @@ export default function InspectionIndexScreen() {
   const [pumpsData, setPumpsData] = useState<Record<string, Record<string, unknown>>>({});
   const [signature, setSignature] = useState<Signature | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [pendingComment, setPendingComment] = useState('');
 
   useFocusEffect(
     useCallback(() => {
@@ -72,6 +74,7 @@ export default function InspectionIndexScreen() {
           }
           const data = parseFormData(insp);
           setInspection(insp);
+          setPendingComment(insp.pending_comment ?? '');
           setPumpsData((data.pumps ?? {}) as Record<string, Record<string, unknown>>);
           setSignature(sigs.find((s) => s.signer_type === 'technician') ?? null);
         } catch (error) {
@@ -105,7 +108,9 @@ export default function InspectionIndexScreen() {
 
     async function go() {
       try {
-        if (inspection!.status === 'draft') await updateStatus(id, 'completed');
+        if (inspection!.status === 'draft' || inspection!.status === 'pending') {
+          await updateStatus(id, 'completed');
+        }
         router.push(`/inspection/${id}/pdf-preview`);
       } catch (error) {
         console.error('[inspection] Failed to complete:', error);
@@ -134,6 +139,22 @@ export default function InspectionIndexScreen() {
     go();
   }
 
+  async function handlePending() {
+    const comment = pendingComment.trim();
+    if (!comment) {
+      Alert.alert('Comentario requerido', 'Explica qué falta antes de marcar la inspección como pendiente.');
+      return;
+    }
+    try {
+      await updateStatus(id, 'pending', comment);
+      setInspection((current) => current ? { ...current, status: 'pending', pending_comment: comment } : current);
+      Alert.alert('Inspección pendiente', 'El motivo quedó guardado.');
+    } catch (error) {
+      console.error('[inspection] Failed to mark pending:', error);
+      Alert.alert('Error', 'No se pudo marcar la inspección como pendiente.');
+    }
+  }
+
   if (isLoading || !inspection) {
     return (
       <View style={styles.centered}>
@@ -143,6 +164,7 @@ export default function InspectionIndexScreen() {
   }
 
   const site = getSiteData(inspection);
+  const locked = inspection.status === 'completed' || inspection.status === 'sent';
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -168,7 +190,7 @@ export default function InspectionIndexScreen() {
           <TouchableOpacity
             key={schema.id}
             style={styles.pumpRow}
-            onPress={() => router.push(`/inspection/${id}/fill?pump=${schema.id}`)}
+            onPress={() => router.push(`/inspection/${id}/fill?pump=${schema.id}${locked ? '&readonly=1' : ''}`)}
             activeOpacity={0.7}
           >
             <View style={styles.pumpInfo}>
@@ -189,8 +211,39 @@ export default function InspectionIndexScreen() {
           signature={signature}
           onSignatureSaved={(sig) => setSignature(sig)}
           onSignatureCleared={() => setSignature(null)}
+          readOnly={locked}
         />
       </View>
+
+      {!locked && (
+        <View style={styles.pendingBox}>
+          <Text style={styles.pendingLabel}>Motivo si queda pendiente</Text>
+          <TextInput
+            style={styles.pendingInput}
+            value={pendingComment}
+            onChangeText={setPendingComment}
+            placeholder="Ej. Falta acceso al cuarto de bombas"
+            placeholderTextColor="#6b7280"
+            multiline
+          />
+          <TouchableOpacity style={styles.pendingButton} onPress={handlePending} activeOpacity={0.8}>
+            <Text style={styles.pendingButtonText}>Marcar como pendiente</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {locked && (
+        <TouchableOpacity
+          style={styles.viewButton}
+          onPress={() => {
+            const first = schemasForInspection(inspection)[0];
+            if (first) router.push(`/inspection/${id}/fill?pump=${first.id}&readonly=1`);
+          }}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.viewButtonText}>Ver inspección</Text>
+        </TouchableOpacity>
+      )}
 
       <TouchableOpacity style={styles.completeButton} onPress={handleComplete} activeOpacity={0.8}>
         <Text style={styles.completeButtonText}>
@@ -282,4 +335,11 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
+  pendingBox: { marginTop: 10, gap: 8 },
+  pendingLabel: { fontSize: 13, fontWeight: '600', color: '#374151' },
+  pendingInput: { minHeight: 72, borderWidth: 1, borderColor: '#d1d5db', borderRadius: 8, padding: 12, backgroundColor: '#ffffff', color: '#111827', textAlignVertical: 'top' },
+  pendingButton: { borderWidth: 1, borderColor: '#d97706', borderRadius: 8, paddingVertical: 12, alignItems: 'center' },
+  pendingButtonText: { color: '#b45309', fontWeight: '700' },
+  viewButton: { backgroundColor: '#1e3a5f', borderRadius: 8, paddingVertical: 14, alignItems: 'center', marginTop: 10 },
+  viewButtonText: { color: '#ffffff', fontWeight: '700', fontSize: 15 },
 });

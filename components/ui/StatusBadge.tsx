@@ -7,6 +7,7 @@ interface Props {
 
 const STATUS_CONFIG: Record<InspectionStatus, { label: string; bg: string; text: string }> = {
   draft: { label: 'Borrador', bg: '#f3f4f6', text: '#374151' },
+  pending: { label: 'Pendiente', bg: '#ffedd5', text: '#9a3412' },
   completed: { label: 'Por enviar', bg: '#fef3c7', text: '#b45309' },
   sent: { label: 'Enviada', bg: '#dcfce7', text: '#15803d' },
 };

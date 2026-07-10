@@ -8,6 +8,14 @@ import { deleteAttachmentFilesForInspection } from '../attachment-files';
 
 type CreateInspectionInput = Omit<Inspection, 'id' | 'created_at' | 'updated_at' | 'sent_at'>;
 
+export interface InspectionFilters {
+  statuses?: InspectionStatus[];
+  clientName?: string;
+  createdFrom?: number;
+  createdTo?: number;
+  limit?: number;
+}
+
 export async function createInspection(input: CreateInspectionInput): Promise<Inspection> {
   const db = getDatabase();
   const now = Date.now();
@@ -21,8 +29,8 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
 
   await db.runAsync(
     `INSERT INTO inspections
-      (id, form_type, form_version, technician_name, client_name, location, status, form_data, created_at, updated_at, sent_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, form_type, form_version, technician_name, client_name, location, status, pending_comment, form_data, created_at, updated_at, sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       inspection.id,
       inspection.form_type,
@@ -31,6 +39,7 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
       inspection.client_name,
       inspection.location,
       inspection.status,
+      inspection.pending_comment,
       inspection.form_data,
       inspection.created_at,
       inspection.updated_at,
@@ -54,14 +63,23 @@ export async function getAllInspections(): Promise<Inspection[]> {
 
 // List screens only need these columns. Skipping form_data (a ~90-field JSON
 // blob per row) keeps the dashboard and history fast as inspections accumulate.
-export async function getInspectionsForList(limit?: number): Promise<InspectionListItem[]> {
+export async function getInspectionsForList(limitOrFilters?: number | InspectionFilters): Promise<InspectionListItem[]> {
   const db = getDatabase();
-  const sql = `SELECT id, technician_name, client_name, location, status, created_at
-               FROM inspections ORDER BY created_at DESC`;
-  if (limit !== undefined) {
-    return db.getAllAsync<InspectionListItem>(`${sql} LIMIT ?`, [limit]);
+  const filters = typeof limitOrFilters === 'number' ? { limit: limitOrFilters } : (limitOrFilters ?? {});
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (filters.statuses?.length) {
+    where.push(`status IN (${filters.statuses.map(() => '?').join(', ')})`);
+    params.push(...filters.statuses);
   }
-  return db.getAllAsync<InspectionListItem>(sql, []);
+  if (filters.clientName?.trim()) { where.push('client_name LIKE ?'); params.push(`%${filters.clientName.trim()}%`); }
+  if (filters.createdFrom !== undefined) { where.push('created_at >= ?'); params.push(filters.createdFrom); }
+  if (filters.createdTo !== undefined) { where.push('created_at <= ?'); params.push(filters.createdTo); }
+  let sql = `SELECT id, technician_name, client_name, location, status, pending_comment, created_at FROM inspections`;
+  if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
+  sql += ' ORDER BY created_at DESC';
+  if (filters.limit !== undefined) { sql += ' LIMIT ?'; params.push(filters.limit); }
+  return db.getAllAsync<InspectionListItem>(sql, params);
 }
 
 // Dashboard stats without loading any rows into memory.
@@ -71,7 +89,7 @@ export async function getInspectionCounts(): Promise<Record<InspectionStatus, nu
     'SELECT status, COUNT(*) as count FROM inspections GROUP BY status',
     []
   );
-  const counts: Record<InspectionStatus, number> = { draft: 0, completed: 0, sent: 0 };
+  const counts: Record<InspectionStatus, number> = { draft: 0, pending: 0, completed: 0, sent: 0 };
   for (const row of rows) {
     if (row.status in counts) counts[row.status] = row.count;
   }
@@ -90,14 +108,16 @@ export async function updateInspection(
   await db.runAsync(`UPDATE inspections SET ${columns} WHERE id = ?`, values);
 }
 
-export async function updateStatus(id: string, status: InspectionStatus): Promise<void> {
+export async function updateStatus(id: string, status: InspectionStatus, pendingComment?: string): Promise<void> {
   const db = getDatabase();
   const now = Date.now();
   const sent_at = status === 'sent' ? now : null;
 
+  const comment = pendingComment?.trim() ?? '';
+  if (status === 'pending' && !comment) throw new Error('PENDING_COMMENT_REQUIRED');
   await db.runAsync(
-    'UPDATE inspections SET status = ?, updated_at = ?, sent_at = ? WHERE id = ?',
-    [status, now, sent_at, id]
+    'UPDATE inspections SET status = ?, pending_comment = ?, updated_at = ?, sent_at = ? WHERE id = ?',
+    [status, status === 'pending' ? comment : null, now, sent_at, id]
   );
 }
 

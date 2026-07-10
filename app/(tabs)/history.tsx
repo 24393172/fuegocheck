@@ -10,6 +10,7 @@ type FilterOption = 'all' | InspectionStatus;
 const FILTERS: { key: FilterOption; label: string }[] = [
   { key: 'all', label: 'Todas' },
   { key: 'draft', label: 'Borrador' },
+  { key: 'pending', label: 'Pendientes' },
   { key: 'completed', label: 'Por enviar' },
   { key: 'sent', label: 'Enviadas' },
 ];
@@ -22,7 +23,7 @@ export default function HistoryScreen() {
 
   async function loadInspections() {
     try {
-      const all = await getInspectionsForList();
+      const all = await getInspectionsForList(filter === 'all' ? undefined : { statuses: [filter] });
       setInspections(all);
     } catch (error) {
       console.error('[history] Failed to load inspections:', error);
@@ -35,11 +36,10 @@ export default function HistoryScreen() {
     useCallback(() => {
       setIsLoading(true);
       loadInspections();
-    }, [])
+    }, [filter])
   );
 
-  const filtered =
-    filter === 'all' ? inspections : inspections.filter((i) => i.status === filter);
+  const filtered = inspections;
 
   function handlePress(inspection: InspectionListItem) {
     // All inspections open their index screen (the list of pumps + share).

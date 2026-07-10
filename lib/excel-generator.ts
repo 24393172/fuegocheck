@@ -33,6 +33,7 @@ function yesNoNaLabel(value: unknown): string {
 
 const STATUS_LABEL: Record<InspectionStatus, string> = {
   draft: 'Borrador',
+  pending: 'Pendiente',
   completed: 'Por enviar',
   sent: 'Enviada',
 };

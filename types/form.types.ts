@@ -34,4 +34,16 @@ export interface FormSchema {
   name: string;
   version: number;
   sections: FormSection[];
+  templateType?: TemplateType;
+  lockedLocations?: string[];
+  mode?: FormMode;
+}
+
+export type TemplateType = 'pump' | 'extinguisher' | 'hydrant' | 'alarm' | 'suppression' | 'other';
+export type FormMode = 'edit' | 'readonly' | 'admin';
+
+export interface TemplateMetadata {
+  templateType: TemplateType;
+  lockedLocations: string[];
+  mode: FormMode;
 }

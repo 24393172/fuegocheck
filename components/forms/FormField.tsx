@@ -7,11 +7,12 @@ import YesNoNaField, { YesNoNaValue } from './YesNoNaField';
 interface Props<T extends FieldValues> {
   field: FormFieldType;
   control: Control<T>;
+  readOnly?: boolean;
 }
 
 // memo prevents re-rendering when the parent re-renders but this field's props
 // haven't changed. With 93 fields in the form this makes a noticeable difference.
-function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
+function FormFieldInner<T extends FieldValues>({ field, control, readOnly = false }: Props<T>) {
   // Local toggle — tracks whether the optional comment box is expanded
   const [showComment, setShowComment] = useState(false);
 
@@ -44,6 +45,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                 keyboardType={field.type === 'number' ? 'numeric' : 'default'}
                 placeholder={field.label}
                 placeholderTextColor="#6b7280"
+                editable={!readOnly}
               />
             )}
 
@@ -58,6 +60,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                 placeholder={field.label}
                 placeholderTextColor="#6b7280"
                 textAlignVertical="top"
+                editable={!readOnly}
               />
             )}
 
@@ -66,10 +69,11 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                 <YesNoNaField
                   value={value as YesNoNaValue}
                   onChange={onChange}
+                  disabled={readOnly}
                 />
 
                 {/* Comment button — always visible, subtle to avoid accidental taps */}
-                <Controller
+                {!readOnly && <Controller
                   control={control}
                   name={commentKey}
                   render={({ field: { value: commentVal, onChange: onCommentChange } }) => (
@@ -111,7 +115,7 @@ function FormFieldInner<T extends FieldValues>({ field, control }: Props<T>) {
                       )}
                     </View>
                   )}
-                />
+                />}
               </View>
             )}
 
