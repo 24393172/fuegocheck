@@ -52,10 +52,35 @@ export async function initializeDatabase(): Promise<void> {
       signed_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS companies (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      area TEXT NOT NULL DEFAULT '',
+      attention TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_photos_inspection ON photos(inspection_id);
     CREATE INDEX IF NOT EXISTS idx_signatures_inspection ON signatures(inspection_id);
     CREATE INDEX IF NOT EXISTS idx_inspections_created ON inspections(created_at DESC);
   `);
+
+  const now = Date.now();
+  await database.runAsync(
+    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    ['company-park-royal-cancun', 'Park Royal Cancun', 'Cuarto de Maquinas', 'Ing. Luis Santos', now]
+  );
+  await database.runAsync(
+    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    ['company-hotel-cancun-centro', 'Hotel Cancun Centro', 'Lobby principal', 'Mantenimiento', now]
+  );
+  await database.runAsync(
+    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    ['company-plaza-las-americas', 'Plaza Las Americas', 'Area comercial', 'Administracion', now]
+  );
 
   // Migrate any legacy 'pending_sync' records to 'completed' — the sync queue
   // no longer exists; sharing is now done manually via the mail composer.

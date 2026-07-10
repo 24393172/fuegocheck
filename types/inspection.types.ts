@@ -13,6 +13,7 @@ export interface SiteData {
 
 export interface SiteFormData {
   site: SiteData;
+  selectedFormatIds?: string[];
   pumps: Record<string, Record<string, unknown>>;
 }
 

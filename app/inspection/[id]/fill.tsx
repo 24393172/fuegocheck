@@ -15,7 +15,7 @@ import { FormSchema } from '../../../types/form.types';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
 import { parseFormData } from '../../../lib/form-data';
-import { PUMP_SCHEMAS } from '../../../schemas';
+import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
@@ -69,7 +69,7 @@ export default function FillScreen() {
   useEffect(() => {
     async function load() {
       try {
-        const s = PUMP_SCHEMAS.find((x) => x.id === pump) ?? null;
+        const s = INSPECTION_SCHEMAS.find((x) => x.id === pump) ?? null;
         if (!s) {
           Alert.alert('Error', 'Tipo de bomba no reconocido.');
           router.back();

@@ -5,7 +5,7 @@
 import * as XLSX from 'xlsx/dist/xlsx.full.min.js';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getInspection, getAllInspections } from './repositories/inspections.repo';
-import { PUMP_SCHEMAS } from '../schemas';
+import { INSPECTION_SCHEMAS, PUMP_SCHEMAS } from '../schemas';
 import { FormSchema, FormField } from '../types/form.types';
 import { InspectionStatus } from '../types/inspection.types';
 import { parseFormData, getSiteData } from './form-data';
@@ -15,6 +15,13 @@ const SHEET_NAME: Record<string, string> = {
   jockey: 'Jockey',
   diesel: 'Diésel',
   electrica: 'Eléctrica',
+  tablero_ad: 'Tablero AD',
+  dispositivos_ad: 'Disp AD',
+  dispositivos_convencionales: 'Disp Conv',
+  dispositivos_notificacion: 'Disp Notif',
+  hidrantes: 'Hidrantes',
+  extintores: 'Extintores',
+  ansul_r102: 'Ansul R-102',
 };
 
 function yesNoNaLabel(value: unknown): string {
@@ -106,6 +113,13 @@ function buildPumpSheet(
   rows.push([`Potencia (HP): ${pumpField('potencia')}`]);
   rows.push([`Capacidad: ${pumpField('capacidad')}`]);
   rows.push([`Voltaje de operación: ${pumpField('voltaje')}`]);
+  for (const section of schema.sections) {
+    if (!section.id.startsWith('datos_') || section.id === 'datos_bomba') continue;
+    for (const field of section.fields) {
+      if (field.type === 'photo' || field.type === 'signature') continue;
+      rows.push([`${field.label}: ${cellValue(field.type, data[field.key])}`]);
+    }
+  }
   rows.push([]);
 
   // Table header. Column 1 is an empty spacer so long questions don't run
@@ -114,7 +128,7 @@ function buildPumpSheet(
 
   for (const section of schema.sections) {
     // Header data goes above; photos never go in the Excel; observations go last.
-    if (section.id === 'datos_bomba' || section.id === 'evidencia_fotografica' || section.id === 'observaciones') {
+    if (section.id.startsWith('datos_') || section.id === 'evidencia_fotografica' || section.id === 'observaciones') {
       continue;
     }
 
@@ -175,11 +189,17 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
   const fullData = parseFormData(inspection);
   const pumps = (fullData.pumps ?? {}) as Record<string, Record<string, unknown>>;
   const site = getSiteData(inspection);
+  const selectedFormatIds = Array.isArray(fullData.selectedFormatIds)
+    ? fullData.selectedFormatIds.filter((x): x is string => typeof x === 'string')
+    : [];
+  const reportSchemas = selectedFormatIds.length > 0
+    ? INSPECTION_SCHEMAS.filter((schema) => selectedFormatIds.includes(schema.id))
+    : PUMP_SCHEMAS;
 
   const wb = XLSX.utils.book_new();
 
   let added = 0;
-  for (const schema of PUMP_SCHEMAS) {
+  for (const schema of reportSchemas) {
     const data = pumps[schema.id] ?? {};
     if (!pumpHasData(schema, data)) continue;
     const ws = XLSX.utils.aoa_to_sheet(buildPumpSheet(schema, site, data));
@@ -214,7 +234,7 @@ export async function generateMasterExcel(): Promise<{ filePath: string; count: 
 
   const wb = XLSX.utils.book_new();
 
-  for (const schema of PUMP_SCHEMAS) {
+  for (const schema of INSPECTION_SCHEMAS) {
     const fieldCols = schema.sections
       .flatMap((s) => s.fields)
       .filter((f) => f.type !== 'photo' && f.type !== 'signature');

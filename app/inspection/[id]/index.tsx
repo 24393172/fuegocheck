@@ -14,7 +14,7 @@ import { FormSchema } from '../../../types/form.types';
 import { getInspection, updateStatus } from '../../../lib/repositories/inspections.repo';
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
 import { getSiteData, parseFormData } from '../../../lib/form-data';
-import { PUMP_SCHEMAS } from '../../../schemas';
+import { INSPECTION_SCHEMAS, PUMP_SCHEMAS } from '../../../schemas';
 import SignatureField from '../../../components/forms/SignatureField';
 
 // Progress of one pump: how many yes/no/na questions are answered, and whether
@@ -35,6 +35,15 @@ function pumpProgress(schema: FormSchema, data: Record<string, unknown>) {
     }
   }
   return { total, answered, hasAnyData };
+}
+
+function schemasForInspection(inspection: Inspection): FormSchema[] {
+  const data = parseFormData(inspection);
+  const selectedFormatIds = Array.isArray(data.selectedFormatIds)
+    ? data.selectedFormatIds.filter((x): x is string => typeof x === 'string')
+    : [];
+  if (selectedFormatIds.length === 0) return PUMP_SCHEMAS;
+  return INSPECTION_SCHEMAS.filter((schema) => selectedFormatIds.includes(schema.id));
 }
 
 export default function InspectionIndexScreen() {
@@ -81,7 +90,7 @@ export default function InspectionIndexScreen() {
   function handleComplete() {
     if (!inspection) return;
 
-    const withData = PUMP_SCHEMAS
+    const withData = schemasForInspection(inspection)
       .map((schema) => ({ schema, progress: pumpProgress(schema, pumpsData[schema.id] ?? {}) }))
       .filter((x) => x.progress.hasAnyData);
 
@@ -144,8 +153,8 @@ export default function InspectionIndexScreen() {
         </Text>
       </View>
 
-      <Text style={styles.sectionLabel}>Bombas</Text>
-      {PUMP_SCHEMAS.map((schema) => {
+      <Text style={styles.sectionLabel}>Formato</Text>
+      {schemasForInspection(inspection).map((schema) => {
         const { total, answered, hasAnyData } = pumpProgress(schema, pumpsData[schema.id] ?? {});
         const complete = hasAnyData && answered === total;
         const statusText = !hasAnyData
