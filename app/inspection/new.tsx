@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ScrollView } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -6,20 +6,19 @@ import { createInspection } from '../../lib/repositories/inspections.repo';
 import { Company, getCompanies } from '../../lib/repositories/companies.repo';
 import { loadSettings } from '../../lib/settings-manager';
 import { SITE_FORM_TYPE, SITE_FORM_VERSION, SiteFormData } from '../../types/inspection.types';
-import { INSPECTION_SCHEMAS } from '../../schemas';
+import { ADDITIONAL_SCHEMAS } from '../../schemas';
 
-type Step = 'client' | 'format';
-
+// Decision B: pumps and other equipment are inspected on different days.
+// - "Nueva inspección" (no ?format) → the 3 pumps together (no selectedFormatIds,
+//   the index screen falls back to PUMP_SCHEMAS).
+// - ?format=<id> (extintores, hidrantes, ...) → that single non-pump format.
 export default function NewInspectionScreen() {
   const router = useRouter();
-  const { format, source } = useLocalSearchParams<{ format?: string; source?: string }>();
-  const extinguisherOnly = format === 'extintores' && source === 'dashboard_extintores';
-  const initialFormat = INSPECTION_SCHEMAS.some((schema) => schema.id === format)
-    ? format!
-    : INSPECTION_SCHEMAS[0]?.id ?? '';
+  const { format } = useLocalSearchParams<{ format?: string; source?: string }>();
 
-  const [step, setStep] = useState<Step>('client');
-  const [selectedFormatId, setSelectedFormatId] = useState(initialFormat);
+  const additionalSchema = ADDITIONAL_SCHEMAS.find((s) => s.id === format);
+  const isExtintores = additionalSchema?.id === 'extintores';
+
   const [clientName, setClientName] = useState('');
   const [area, setArea] = useState('');
   const [atencion, setAtencion] = useState('');
@@ -27,13 +26,6 @@ export default function NewInspectionScreen() {
   const [isCreating, setIsCreating] = useState(false);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState('');
-
-  const formats = useMemo(
-    () => extinguisherOnly
-      ? INSPECTION_SCHEMAS.filter((schema) => schema.id === 'extintores')
-      : INSPECTION_SCHEMAS,
-    [extinguisherOnly]
-  );
 
   useEffect(() => {
     loadSettings()
@@ -51,39 +43,19 @@ export default function NewInspectionScreen() {
     setAtencion(company.attention);
   }
 
-  function handleNext() {
+  async function handleCreate() {
     if (!clientName.trim()) {
       Alert.alert('Campo requerido', 'Ingresa el nombre del cliente.');
       return;
     }
     if (!area.trim()) {
-      Alert.alert('Campo requerido', 'Ingresa el area (ej. Cuarto de Maquinas).');
-      return;
-    }
-    if (extinguisherOnly) {
-      handleCreate('extintores');
-      return;
-    }
-    setStep('format');
-  }
-
-  async function handleCreate(formatId = selectedFormatId) {
-    if (!clientName.trim()) {
-      Alert.alert('Campo requerido', 'Ingresa el nombre del cliente.');
-      return;
-    }
-    if (!area.trim()) {
-      Alert.alert('Campo requerido', 'Ingresa el area (ej. Cuarto de Maquinas).');
-      return;
-    }
-    if (!formatId) {
-      Alert.alert('Campo requerido', 'Elige el formato de inspeccion que vas a llenar.');
+      Alert.alert('Campo requerido', 'Ingresa el área (ej. Cuarto de Máquinas).');
       return;
     }
     if (!technicianName.trim()) {
       Alert.alert(
-        'Falta el tecnico',
-        'Configura tu nombre de tecnico en la pestana Ajustes antes de crear una inspeccion.'
+        'Falta el técnico',
+        'Configura tu nombre de técnico en la pestaña Ajustes antes de crear una inspección.'
       );
       return;
     }
@@ -104,9 +76,10 @@ export default function NewInspectionScreen() {
           fecha: today,
           tecnico: technicianName.trim(),
         },
-        selectedFormatIds: [formatId],
         pumps: {},
       };
+      // Pumps stay implicit (the 3 together). A specific format pins selectedFormatIds.
+      if (additionalSchema) initialFormData.selectedFormatIds = [additionalSchema.id];
 
       const inspection = await createInspection({
         form_type: SITE_FORM_TYPE,
@@ -122,154 +95,99 @@ export default function NewInspectionScreen() {
       router.replace(`/inspection/${inspection.id}`);
     } catch (error) {
       console.error('[new] Failed to create inspection:', error);
-      Alert.alert('Error', 'No se pudo crear la inspeccion. Intenta de nuevo.');
+      Alert.alert('Error', 'No se pudo crear la inspección. Intenta de nuevo.');
     } finally {
       setIsCreating(false);
     }
   }
 
+  const title = additionalSchema ? additionalSchema.name : 'Inspección de bombas';
+  const hint = additionalSchema
+    ? `Captura los datos del sitio para iniciar ${additionalSchema.name.toLowerCase()}.`
+    : 'Captura los datos del sitio. Se abrirán las 3 bombas (jockey, diésel y eléctrica).';
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.formType}>
-        {extinguisherOnly ? 'Extintores' : 'Nueva inspeccion'}
-      </Text>
-      <Text style={styles.hint}>
-        {step === 'client'
-          ? extinguisherOnly
-            ? 'Elige una empresa para iniciar el formato de extintores.'
-            : 'Primero captura los datos del cliente.'
-          : 'Ahora elige el formato que vas a llenar.'}
-      </Text>
+      <Text style={styles.formType}>{title}</Text>
+      <Text style={styles.hint}>{hint}</Text>
 
-      {step === 'client' ? (
-        <>
-          {extinguisherOnly && (
-            <View style={styles.field}>
-              <Text style={styles.label}>Empresa <Text style={styles.required}>*</Text></Text>
-              <View style={styles.companyList}>
-                {companies.map((company) => {
-                  const selected = selectedCompanyId === company.id;
-                  return (
-                    <TouchableOpacity
-                      key={company.id}
-                      style={[styles.companyCard, selected && styles.companyCardSelected]}
-                      onPress={() => applyCompany(company)}
-                      activeOpacity={0.76}
-                    >
-                      <View style={styles.companyIcon}>
-                        <Ionicons name="business" size={21} color={selected ? '#ffffff' : '#1f3f66'} />
-                      </View>
-                      <View style={styles.companyTextBlock}>
-                        <Text style={[styles.companyName, selected && styles.companyNameSelected]}>
-                          {company.name}
-                        </Text>
-                        <Text style={[styles.companyMeta, selected && styles.companyMetaSelected]}>
-                          {company.area}
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-          )}
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Cliente <Text style={styles.required}>*</Text></Text>
-            <TextInput
-              style={styles.input}
-              value={clientName}
-              onChangeText={setClientName}
-              placeholder="Nombre del cliente o empresa"
-              placeholderTextColor="#6b7280"
-              autoCapitalize="words"
-            />
-          </View>
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Area <Text style={styles.required}>*</Text></Text>
-            <TextInput
-              style={styles.input}
-              value={area}
-              onChangeText={setArea}
-              placeholder="Ej. Cuarto de Maquinas"
-              placeholderTextColor="#6b7280"
-              autoCapitalize="sentences"
-            />
-          </View>
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Atencion</Text>
-            <TextInput
-              style={styles.input}
-              value={atencion}
-              onChangeText={setAtencion}
-              placeholder="Ing. responsable (opcional)"
-              placeholderTextColor="#6b7280"
-              autoCapitalize="words"
-            />
-          </View>
-
-          <TouchableOpacity
-            style={[styles.button, isCreating && styles.buttonDisabled]}
-            onPress={handleNext}
-            disabled={isCreating}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.buttonText}>
-              {isCreating ? 'Creando...' : extinguisherOnly ? 'Iniciar extintores' : 'Continuar'}
-            </Text>
-          </TouchableOpacity>
-        </>
-      ) : (
-        <>
-          <View style={styles.summaryCard}>
-            <Text style={styles.summaryTitle}>{clientName}</Text>
-            <Text style={styles.summaryText}>{area}</Text>
-            {atencion.trim() ? <Text style={styles.summaryText}>{atencion}</Text> : null}
-          </View>
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Formato <Text style={styles.required}>*</Text></Text>
-            <View style={styles.formatGrid}>
-              {formats.map((item) => {
-                const selected = selectedFormatId === item.id;
-                return (
-                  <TouchableOpacity
-                    key={item.id}
-                    style={[styles.formatCard, selected && styles.formatCardSelected]}
-                    onPress={() => setSelectedFormatId(item.id)}
-                    activeOpacity={0.75}
-                  >
-                    <Text style={[styles.formatName, selected && styles.formatNameSelected]}>
-                      {item.name}
+      {isExtintores && companies.length > 0 && (
+        <View style={styles.field}>
+          <Text style={styles.label}>Empresa</Text>
+          <View style={styles.companyList}>
+            {companies.map((company) => {
+              const selected = selectedCompanyId === company.id;
+              return (
+                <TouchableOpacity
+                  key={company.id}
+                  style={[styles.companyCard, selected && styles.companyCardSelected]}
+                  onPress={() => applyCompany(company)}
+                  activeOpacity={0.76}
+                >
+                  <View style={styles.companyIcon}>
+                    <Ionicons name="business" size={21} color={selected ? '#ffffff' : '#1f3f66'} />
+                  </View>
+                  <View style={styles.companyTextBlock}>
+                    <Text style={[styles.companyName, selected && styles.companyNameSelected]}>
+                      {company.name}
                     </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+                    <Text style={[styles.companyMeta, selected && styles.companyMetaSelected]}>
+                      {company.area}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
           </View>
-
-          <View style={styles.buttonRow}>
-            <TouchableOpacity
-              style={[styles.secondaryButton, isCreating && styles.buttonDisabled]}
-              onPress={() => setStep('client')}
-              disabled={isCreating}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.secondaryButtonText}>Regresar</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.button, styles.buttonFlex, isCreating && styles.buttonDisabled]}
-              onPress={() => handleCreate()}
-              disabled={isCreating}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.buttonText}>{isCreating ? 'Creando...' : 'Iniciar inspeccion'}</Text>
-            </TouchableOpacity>
-          </View>
-        </>
+        </View>
       )}
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Cliente <Text style={styles.required}>*</Text></Text>
+        <TextInput
+          style={styles.input}
+          value={clientName}
+          onChangeText={setClientName}
+          placeholder="Nombre del cliente o empresa"
+          placeholderTextColor="#6b7280"
+          autoCapitalize="words"
+        />
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Área <Text style={styles.required}>*</Text></Text>
+        <TextInput
+          style={styles.input}
+          value={area}
+          onChangeText={setArea}
+          placeholder="Ej. Cuarto de Máquinas"
+          placeholderTextColor="#6b7280"
+          autoCapitalize="sentences"
+        />
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Atención</Text>
+        <TextInput
+          style={styles.input}
+          value={atencion}
+          onChangeText={setAtencion}
+          placeholder="Ing. responsable (opcional)"
+          placeholderTextColor="#6b7280"
+          autoCapitalize="words"
+        />
+      </View>
+
+      <TouchableOpacity
+        style={[styles.button, isCreating && styles.buttonDisabled]}
+        onPress={handleCreate}
+        disabled={isCreating}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.buttonText}>
+          {isCreating ? 'Creando...' : additionalSchema ? `Iniciar ${additionalSchema.name}` : 'Iniciar inspección'}
+        </Text>
+      </TouchableOpacity>
     </ScrollView>
   );
 }
@@ -359,74 +277,12 @@ const styles = StyleSheet.create({
   companyMetaSelected: {
     color: '#dbeafe',
   },
-  summaryCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#e5e7eb',
-    padding: 14,
-    gap: 3,
-  },
-  summaryTitle: {
-    color: '#111827',
-    fontSize: 16,
-    fontWeight: '800',
-  },
-  summaryText: {
-    color: '#6b7280',
-    fontSize: 13,
-  },
-  formatGrid: {
-    gap: 10,
-  },
-  formatCard: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
-  formatCardSelected: {
-    backgroundColor: '#1e3a5f',
-    borderColor: '#1e3a5f',
-  },
-  formatName: {
-    color: '#111827',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  formatNameSelected: {
-    color: '#ffffff',
-  },
   button: {
     backgroundColor: '#1e3a5f',
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: 'center',
     marginTop: 8,
-  },
-  buttonFlex: {
-    flex: 1,
-  },
-  secondaryButton: {
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    backgroundColor: '#ffffff',
-    borderRadius: 8,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  secondaryButtonText: {
-    color: '#374151',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 10,
   },
   buttonDisabled: {
     opacity: 0.6,
