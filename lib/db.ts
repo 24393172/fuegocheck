@@ -66,6 +66,44 @@ export async function initializeDatabase(): Promise<void> {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS catalog_companies (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      business_name TEXT NOT NULL DEFAULT '',
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      server_updated_at TEXT NOT NULL,
+      synced_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_branches (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES catalog_companies(id),
+      name TEXT NOT NULL,
+      address TEXT NOT NULL DEFAULT '',
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      server_updated_at TEXT NOT NULL,
+      synced_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_locations (
+      id TEXT PRIMARY KEY,
+      company_id TEXT NOT NULL REFERENCES catalog_companies(id),
+      branch_id TEXT REFERENCES catalog_branches(id),
+      equipment_type TEXT NOT NULL CHECK (equipment_type IN ('extinguisher', 'hydrant')),
+      name TEXT NOT NULL,
+      area TEXT NOT NULL DEFAULT '',
+      floor TEXT NOT NULL DEFAULT '',
+      reference TEXT NOT NULL DEFAULT '',
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      server_updated_at TEXT NOT NULL,
+      synced_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS template_types (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL
     );
@@ -92,6 +130,12 @@ export async function initializeDatabase(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_photos_inspection ON photos(inspection_id);
     CREATE INDEX IF NOT EXISTS idx_signatures_inspection ON signatures(inspection_id);
     CREATE INDEX IF NOT EXISTS idx_inspections_created ON inspections(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_catalog_branches_company
+      ON catalog_branches(company_id, active, name);
+    CREATE INDEX IF NOT EXISTS idx_catalog_locations_company_type
+      ON catalog_locations(company_id, equipment_type, active, name);
+    CREATE INDEX IF NOT EXISTS idx_catalog_locations_branch_type
+      ON catalog_locations(branch_id, equipment_type, active, name);
   `);
 
   const inspectionColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(inspections)');
@@ -145,5 +189,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 3;');
+  await database.execAsync('PRAGMA user_version = 4;');
 }

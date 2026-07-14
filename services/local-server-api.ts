@@ -12,6 +12,11 @@ export interface ExtinguisherSyncPayload {
   syncVersion: number;
 }
 
+type ExtinguisherServerRecord = Omit<
+  ExtinguisherRecord,
+  'locationId' | 'locationNameSnapshot' | 'customLocation'
+>;
+
 export interface HealthResponse {
   ok: true;
   service: 'ExtinCheck Local Server';
@@ -24,6 +29,12 @@ export interface SyncResponse {
   inspectionId: string;
   extinguishersReceived: number;
   syncedAt: string;
+  report: {
+    id: string;
+    filename: string;
+    downloadUrl: string;
+    generatedAt: string;
+  };
 }
 
 export class LocalServerApiError extends Error {
@@ -37,7 +48,7 @@ export class LocalServerApiError extends Error {
   }
 }
 
-function baseUrl(): string {
+export function getLocalServerUrl(): string {
   const configured = process.env.EXPO_PUBLIC_LOCAL_SERVER_URL?.trim().replace(/\/$/, '');
   if (!configured) {
     throw new LocalServerApiError(
@@ -62,11 +73,11 @@ function baseUrl(): string {
   return configured;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestLocalServer<T>(path: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${baseUrl()}${path}`, {
+    const response = await fetch(`${getLocalServerUrl()}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -74,10 +85,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ...init?.headers,
       },
     });
-    const body = await response.json().catch(() => null) as { message?: string } | null;
+    const body = await response.json().catch(() => null) as {
+      message?: string;
+      issues?: Array<{ path?: string; message?: string }>;
+    } | null;
     if (!response.ok) {
+      const issueDetails = body?.issues
+        ?.slice(0, 3)
+        .map((issue) => [issue.path, issue.message].filter(Boolean).join(': '))
+        .filter(Boolean)
+        .join('; ');
       throw new LocalServerApiError(
-        body?.message || `Local server returned HTTP ${response.status}`,
+        [body?.message || `Local server returned HTTP ${response.status}`, issueDetails]
+          .filter(Boolean)
+          .join(' — '),
         response.status,
         response.status === 400 ? 'VALIDATION' : 'SERVER'
       );
@@ -109,7 +130,7 @@ export function inspectionDateToIso(value: string): string {
 }
 
 export async function checkServerHealth(): Promise<HealthResponse> {
-  const response = await request<HealthResponse>('/api/health');
+  const response = await requestLocalServer<HealthResponse>('/api/health');
   if (!response.ok || response.service !== 'ExtinCheck Local Server') {
     throw new LocalServerApiError('Unexpected health response', 0, 'SERVER');
   }
@@ -119,10 +140,45 @@ export async function checkServerHealth(): Promise<HealthResponse> {
 export function syncExtinguisherInspection(
   payload: ExtinguisherSyncPayload
 ): Promise<SyncResponse> {
-  return request<SyncResponse>('/api/inspections/extinguishers', {
+  // The mobile record also contains catalog snapshot fields used offline.
+  // Keep those fields in SQLite, but send only the server's strict API contract.
+  const serverPayload = {
+    ...payload,
+    extinguishers: payload.extinguishers.map(toExtinguisherServerRecord),
+  };
+  return requestLocalServer<SyncResponse>('/api/inspections/extinguishers', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(serverPayload),
   });
 }
 
+export function toExtinguisherServerRecord(
+  record: ExtinguisherRecord
+): ExtinguisherServerRecord {
+  return {
+    id: record.id,
+    numero: record.numero,
+    ubicacion: record.ubicacion,
+    tipo_extintor: record.tipo_extintor,
+    capacidad: record.capacidad,
+    proxima_recarga: record.proxima_recarga,
+    presion: record.presion,
+    presion_comentario: record.presion_comentario,
+    altura: record.altura,
+    altura_comentario: record.altura_comentario,
+    seguro: record.seguro,
+    seguro_comentario: record.seguro_comentario,
+    pintura: record.pintura,
+    pintura_comentario: record.pintura_comentario,
+    manguera: record.manguera,
+    manguera_comentario: record.manguera_comentario,
+    difusor: record.difusor,
+    difusor_comentario: record.difusor_comentario,
+    senalamiento: record.senalamiento,
+    senalamiento_comentario: record.senalamiento_comentario,
+    observaciones: record.observaciones,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}

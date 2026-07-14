@@ -1,6 +1,9 @@
 import { Inspection, SiteData } from '../types/inspection.types';
 
-const EMPTY_SITE: SiteData = { cliente: '', atencion: '', area: '', fecha: '', tecnico: '' };
+const EMPTY_SITE: SiteData = {
+  cliente: '', atencion: '', area: '', fecha: '', tecnico: '',
+  companyId: null, companyNameSnapshot: '', branchId: null, branchNameSnapshot: '',
+};
 
 // Parses form_data defensively — a corrupted record returns {} instead of crashing.
 export function parseFormData(inspection: Inspection): Record<string, unknown> {
@@ -16,8 +19,16 @@ export function parseFormData(inspection: Inspection): Record<string, unknown> {
 // complete object so callers can read fields without extra checks.
 export function getSiteData(inspection: Inspection): SiteData {
   const data = parseFormData(inspection);
-  const site = (data.site ?? {}) as Partial<SiteData>;
-  return { ...EMPTY_SITE, ...site };
+  // Very old records may have stored these fields at the form-data root.
+  const site = ((data.site && typeof data.site === 'object') ? data.site : data) as Partial<SiteData>;
+  const merged = { ...EMPTY_SITE, ...site };
+  return {
+    ...merged,
+    companyId: site.companyId || null,
+    companyNameSnapshot: site.companyNameSnapshot || merged.cliente || inspection.client_name || '',
+    branchId: site.branchId || null,
+    branchNameSnapshot: site.branchNameSnapshot || merged.area || '',
+  };
 }
 
 // One pump's answers (e.g. pumps.jockey). Returns {} if that pump was not touched.

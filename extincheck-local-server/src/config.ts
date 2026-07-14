@@ -16,9 +16,17 @@ export const config = {
   host: process.env.HOST?.trim() || '0.0.0.0',
   port: portFromEnvironment(),
   databasePath: path.resolve(projectRoot, process.env.DATABASE_PATH?.trim() || './data/extincheck-local.sqlite'),
+  templatePath: path.resolve(
+    projectRoot,
+    process.env.EXTINGUISHERS_TEMPLATE_PATH?.trim() || './templates/FORMATOS P.R. CANCUN.xlsx'
+  ),
+  generatedReportsPath: path.resolve(
+    projectRoot,
+    process.env.GENERATED_REPORTS_PATH?.trim() || './generated-reports'
+  ),
+  adminWebPath: path.resolve(projectRoot, process.env.ADMIN_WEB_PATH?.trim() || './admin-web/dist'),
   corsOrigins: (process.env.CORS_ORIGINS ?? 'http://localhost:8081,http://localhost:19006')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
 };
-

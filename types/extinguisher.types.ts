@@ -4,6 +4,9 @@ export interface ExtinguisherRecord {
   id: string;
   numero: string;
   ubicacion: string;
+  locationId: string | null;
+  locationNameSnapshot: string;
+  customLocation: boolean;
   tipo_extintor: string;
   capacidad: string;
   proxima_recarga: string;
@@ -29,4 +32,3 @@ export interface ExtinguisherRecord {
 export interface ExtinguisherCollection {
   items: ExtinguisherRecord[];
 }
-

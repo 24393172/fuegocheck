@@ -12,7 +12,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { createInspection } from '../../lib/repositories/inspections.repo';
-import { Company, getCompanies } from '../../lib/repositories/companies.repo';
+import { getBranchesByCompany, getCompanies, syncCatalog } from '../../services/catalog-sync';
+import { CatalogBranch, CatalogCompany } from '../../types/catalog.types';
 import { loadSettings } from '../../lib/settings-manager';
 import { INSPECTION_FORMAT_OPTIONS, PUMPS_FORMAT_ID } from '../../lib/inspection-formats';
 import { SITE_FORM_TYPE, SITE_FORM_VERSION, SiteFormData } from '../../types/inspection.types';
@@ -100,8 +101,11 @@ export default function NewInspectionScreen() {
   const [companySearch, setCompanySearch] = useState('');
   const [technicianName, setTechnicianName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
-  const [companies, setCompanies] = useState<Company[]>([]);
+  const [companies, setCompanies] = useState<CatalogCompany[]>([]);
+  const [branches, setBranches] = useState<CatalogBranch[]>([]);
   const [selectedCompanyId, setSelectedCompanyId] = useState('');
+  const [selectedBranchId, setSelectedBranchId] = useState('');
+  const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
 
   const selectedTemplate = availableTemplates.find(
     (template) => template.id === selectedTemplateId
@@ -128,9 +132,11 @@ export default function NewInspectionScreen() {
       .catch(console.error);
   }, []);
 
-  function toggleCompany(company: Company) {
+  async function toggleCompany(company: CatalogCompany) {
     if (selectedCompanyId === company.id) {
       setSelectedCompanyId('');
+      setSelectedBranchId('');
+      setBranches([]);
       setClientName('');
       setArea('');
       setAtencion('');
@@ -138,9 +144,42 @@ export default function NewInspectionScreen() {
     }
 
     setSelectedCompanyId(company.id);
+    setSelectedBranchId('');
     setClientName(company.name);
-    setArea(company.area);
-    setAtencion(company.attention);
+    setArea('');
+    setAtencion('');
+    try {
+      setBranches(await getBranchesByCompany(company.id));
+    } catch (error) {
+      console.error('[new] Failed to load branches:', error);
+      setBranches([]);
+    }
+  }
+
+  function selectBranch(branch: CatalogBranch | null) {
+    setSelectedBranchId(branch?.id ?? '');
+    setArea(branch?.name ?? '');
+  }
+
+  async function handleCatalogSync() {
+    if (isSyncingCatalog) return;
+    try {
+      setIsSyncingCatalog(true);
+      await syncCatalog();
+      setCompanies(await getCompanies());
+      Alert.alert(
+        'Catálogo actualizado',
+        'Catálogo actualizado correctamente.\nLas empresas y ubicaciones ya están disponibles sin conexión.'
+      );
+    } catch (error) {
+      console.error('[new] Catalog sync failed:', error);
+      Alert.alert(
+        'Servidor no disponible',
+        'No se encontró el servidor local.\nPuedes continuar usando el último catálogo guardado en el dispositivo.'
+      );
+    } finally {
+      setIsSyncingCatalog(false);
+    }
   }
 
   function handleContinue() {
@@ -158,10 +197,6 @@ export default function NewInspectionScreen() {
     }
     if (!clientName.trim()) {
       Alert.alert('Campo requerido', 'Ingresa el nombre del cliente.');
-      return;
-    }
-    if (!area.trim()) {
-      Alert.alert('Campo requerido', 'Ingresa el área (ej. Cuarto de Máquinas).');
       return;
     }
     if (!technicianName.trim()) {
@@ -183,6 +218,10 @@ export default function NewInspectionScreen() {
       const initialFormData: SiteFormData = {
         site: {
           cliente: clientName.trim(),
+          companyId: selectedCompanyId,
+          companyNameSnapshot: clientName.trim(),
+          branchId: selectedBranchId || null,
+          branchNameSnapshot: branches.find((branch) => branch.id === selectedBranchId)?.name ?? '',
           atencion: atencion.trim(),
           area: area.trim(),
           fecha: today,
@@ -309,7 +348,7 @@ export default function NewInspectionScreen() {
         </Text>
       </View>
 
-      {companies.length > 0 && (
+      {companies.length > 0 ? (
         <View style={styles.field}>
           <Text style={styles.label}>Selecciona una empresa</Text>
           <View style={styles.searchBox}>
@@ -342,7 +381,7 @@ export default function NewInspectionScreen() {
                 <TouchableOpacity
                   key={company.id}
                   style={[styles.companyCard, selected && styles.companyCardSelected]}
-                  onPress={() => toggleCompany(company)}
+                  onPress={() => void toggleCompany(company)}
                   disabled={isCreating}
                   activeOpacity={0.76}
                 >
@@ -353,9 +392,11 @@ export default function NewInspectionScreen() {
                     <Text style={[styles.companyName, selected && styles.companyNameSelected]}>
                       {company.name}
                     </Text>
-                    <Text style={[styles.companyMeta, selected && styles.companyMetaSelected]}>
-                      {company.area}
-                    </Text>
+                    {!!company.businessName && (
+                      <Text style={[styles.companyMeta, selected && styles.companyMetaSelected]}>
+                        {company.businessName}
+                      </Text>
+                    )}
                   </View>
                 </TouchableOpacity>
               );
@@ -368,6 +409,58 @@ export default function NewInspectionScreen() {
                 </Text>
               </View>
             )}
+          </View>
+        </View>
+      ) : (
+        <View style={styles.noCatalogCard}>
+          <Ionicons name="cloud-offline-outline" size={30} color="#64748b" />
+          <Text style={styles.noCatalogTitle}>No hay empresas disponibles en este dispositivo.</Text>
+          <Text style={styles.noCatalogText}>
+            Conéctate a la misma red que el servidor y actualiza el catálogo.
+          </Text>
+          <TouchableOpacity
+            style={[styles.catalogButton, isSyncingCatalog && styles.buttonDisabled]}
+            onPress={handleCatalogSync}
+            disabled={isSyncingCatalog}
+          >
+            <Text style={styles.catalogButtonText}>
+              {isSyncingCatalog ? 'Actualizando...' : 'Actualizar catálogo'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {selectedCompanyId && branches.length > 0 && (
+        <View style={styles.field}>
+          <Text style={styles.label}>Sucursal (opcional)</Text>
+          <View style={styles.branchList}>
+            <TouchableOpacity
+              style={[styles.branchCard, !selectedBranchId && styles.branchCardSelected]}
+              onPress={() => selectBranch(null)}
+            >
+              <Text style={[styles.branchName, !selectedBranchId && styles.branchNameSelected]}>
+                Sin sucursal
+              </Text>
+            </TouchableOpacity>
+            {branches.map((branch) => {
+              const selected = branch.id === selectedBranchId;
+              return (
+                <TouchableOpacity
+                  key={branch.id}
+                  style={[styles.branchCard, selected && styles.branchCardSelected]}
+                  onPress={() => selectBranch(branch)}
+                >
+                  <Text style={[styles.branchName, selected && styles.branchNameSelected]}>
+                    {branch.name}
+                  </Text>
+                  {!!branch.address && (
+                    <Text style={[styles.branchAddress, selected && styles.companyMetaSelected]}>
+                      {branch.address}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
           </View>
         </View>
       )}
@@ -389,7 +482,7 @@ export default function NewInspectionScreen() {
 
       <View style={styles.field}>
         <Text style={styles.label}>
-          Área <Text style={styles.required}>*</Text>
+          Área / sucursal
         </Text>
         <TextInput
           style={[styles.input, styles.inputDisabled]}
@@ -588,6 +681,39 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontSize: 13,
   },
+  noCatalogCard: {
+    padding: 20,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    gap: 8,
+  },
+  noCatalogTitle: { color: '#334155', fontSize: 15, fontWeight: '800', textAlign: 'center' },
+  noCatalogText: { color: '#64748b', fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  catalogButton: {
+    marginTop: 4,
+    minHeight: 44,
+    paddingHorizontal: 18,
+    borderRadius: 9,
+    backgroundColor: '#1e3a5f',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  catalogButtonText: { color: '#ffffff', fontSize: 14, fontWeight: '700' },
+  branchList: { gap: 8 },
+  branchCard: {
+    padding: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    backgroundColor: '#ffffff',
+  },
+  branchCardSelected: { borderColor: '#1e3a5f', backgroundColor: '#1e3a5f' },
+  branchName: { color: '#334155', fontSize: 14, fontWeight: '700' },
+  branchNameSelected: { color: '#ffffff' },
+  branchAddress: { color: '#64748b', fontSize: 12, marginTop: 3 },
   companyCard: {
     backgroundColor: '#ffffff',
     borderWidth: 1,

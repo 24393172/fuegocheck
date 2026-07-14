@@ -10,6 +10,10 @@ export interface SiteData {
   area: string;
   fecha: string;
   tecnico: string;
+  companyId?: string | null;
+  companyNameSnapshot?: string;
+  branchId?: string | null;
+  branchNameSnapshot?: string;
 }
 
 export interface SiteFormData {

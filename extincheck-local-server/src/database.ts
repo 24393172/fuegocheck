@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { ExtinguisherInspectionPayload } from './validation.js';
 
@@ -54,6 +55,22 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_extinguishers_inspection
       ON extinguishers(inspection_id);
+
+      CREATE TABLE IF NOT EXISTS generated_reports (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        format_type TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('generated', 'error')),
+        error_message TEXT,
+        template_version TEXT NOT NULL,
+        UNIQUE (inspection_id, format_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_generated_reports_generated_at
+      ON generated_reports(generated_at DESC);
     `);
   }
 
@@ -157,6 +174,89 @@ export class LocalDatabase {
     return row.count;
   }
 
+  saveGeneratedReport(input: {
+    inspectionId: string;
+    formatType: string;
+    filename: string;
+    filePath: string;
+    generatedAt: string;
+    status: 'generated' | 'error';
+    errorMessage: string | null;
+    templateVersion: string;
+  }): GeneratedReport {
+    const existing = this.getReportForInspection(input.inspectionId, input.formatType);
+    const id = existing?.id ?? randomUUID();
+    this.database.prepare(`
+      INSERT INTO generated_reports (
+        id, inspection_id, format_type, filename, file_path, generated_at,
+        status, error_message, template_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inspection_id, format_type) DO UPDATE SET
+        filename = excluded.filename,
+        file_path = excluded.file_path,
+        generated_at = excluded.generated_at,
+        status = excluded.status,
+        error_message = excluded.error_message,
+        template_version = excluded.template_version
+    `).run(
+      id,
+      input.inspectionId,
+      input.formatType,
+      input.filename,
+      input.filePath,
+      input.generatedAt,
+      input.status,
+      input.errorMessage,
+      input.templateVersion
+    );
+    return this.getReport(id)!;
+  }
+
+  getReport(id: string): GeneratedReport | undefined {
+    return this.database.prepare(`
+      SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
+             r.status, r.error_message, r.template_version,
+             i.company_name, i.inspection_date
+      FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.id = ?
+    `).get(id) as GeneratedReport | undefined;
+  }
+
+  getReportForInspection(inspectionId: string, formatType: string): GeneratedReport | undefined {
+    return this.database.prepare(`
+      SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
+             r.status, r.error_message, r.template_version,
+             i.company_name, i.inspection_date
+      FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
+      WHERE r.inspection_id = ? AND r.format_type = ?
+    `).get(inspectionId, formatType) as GeneratedReport | undefined;
+  }
+
+  getReportByFilename(filename: string): GeneratedReport | undefined {
+    return this.database.prepare(`
+      SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
+             r.status, r.error_message, r.template_version,
+             i.company_name, i.inspection_date
+      FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.filename = ?
+    `).get(filename) as GeneratedReport | undefined;
+  }
+
+  listReports(): GeneratedReport[] {
+    return this.database.prepare(`
+      SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
+             r.status, r.error_message, r.template_version,
+             i.company_name, i.inspection_date
+      FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
+      ORDER BY r.generated_at DESC
+    `).all() as unknown as GeneratedReport[];
+  }
+
+  reportCount(inspectionId: string): number {
+    const row = this.database.prepare(
+      'SELECT COUNT(*) AS count FROM generated_reports WHERE inspection_id = ?'
+    ).get(inspectionId) as { count: number };
+    return row.count;
+  }
+
   summary() {
     return {
       inspections: this.database.prepare('SELECT COUNT(*) AS count FROM inspections').get(),
@@ -164,6 +264,11 @@ export class LocalDatabase {
       recent: this.database.prepare(`
         SELECT id, company_name, inspection_date, updated_at, sync_version
         FROM inspections ORDER BY updated_at DESC LIMIT 20
+      `).all(),
+      reports: this.database.prepare(`
+        SELECT id, inspection_id, format_type, filename, generated_at, status,
+               error_message, template_version
+        FROM generated_reports ORDER BY generated_at DESC LIMIT 20
       `).all(),
     };
   }
@@ -173,3 +278,16 @@ export class LocalDatabase {
   }
 }
 
+export interface GeneratedReport {
+  id: string;
+  inspection_id: string;
+  format_type: string;
+  filename: string;
+  file_path: string;
+  generated_at: string;
+  status: 'generated' | 'error';
+  error_message: string | null;
+  template_version: string;
+  company_name: string;
+  inspection_date: string;
+}

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -19,11 +20,13 @@ import {
   isExtinguisherComplete,
   normalizeExtinguisherCollection,
 } from '../../../lib/extinguishers';
-import { parseFormData } from '../../../lib/form-data';
+import { getSiteData, parseFormData } from '../../../lib/form-data';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { generateId } from '../../../lib/uuid';
 import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { ExtinguisherRecord } from '../../../types/extinguisher.types';
+import { CatalogLocation } from '../../../types/catalog.types';
+import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
 
 const extinguisherSchema = INSPECTION_SCHEMAS.find((schema) => schema.id === 'extintores');
 
@@ -39,6 +42,8 @@ export default function ExtinguisherEditorScreen() {
   const [isReadOnly, setIsReadOnly] = useState(readonly === '1');
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [locations, setLocations] = useState<CatalogLocation[]>([]);
+  const [locationSearch, setLocationSearch] = useState('');
   const loadedRef = useRef(false);
   const createdAtRef = useRef(Date.now());
   const pendingRef = useRef<ExtinguisherRecord | null>(null);
@@ -46,7 +51,7 @@ export default function ExtinguisherEditorScreen() {
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const readOnlyRef = useRef(readonly === '1');
 
-  const { control, reset, getValues } = useForm<ExtinguisherRecord>({
+  const { control, reset, getValues, setValue } = useForm<ExtinguisherRecord>({
     defaultValues: createEmptyExtinguisher(recordId),
   });
   const watchedValues = useWatch({ control });
@@ -85,6 +90,19 @@ export default function ExtinguisherEditorScreen() {
         const initial = existing ?? createEmptyExtinguisher(recordId);
         createdAtRef.current = initial.createdAt;
         reset(initial);
+
+        const site = getSiteData(inspection);
+        if (site.companyId) {
+          try {
+            const availableLocations = site.branchId
+              ? await getLocationsByBranch(site.branchId, 'extinguisher')
+              : await getLocationsByCompany(site.companyId, 'extinguisher');
+            setLocations(availableLocations);
+          } catch (error) {
+            console.error('[extinguisher-editor] Failed to load catalog locations:', error);
+            setLocations([]);
+          }
+        }
         loadedRef.current = true;
       } catch (error) {
         console.error('[extinguisher-editor] Failed to load:', error);
@@ -197,6 +215,15 @@ export default function ExtinguisherEditorScreen() {
     }
   }
 
+  const normalizedSearch = locationSearch.trim().toLocaleLowerCase('es-MX');
+  const filteredLocations = useMemo(() => {
+    if (!normalizedSearch) return locations;
+    return locations.filter((location) =>
+      [location.name, location.area, location.floor, location.reference]
+      .some((value) => value.toLocaleLowerCase('es-MX').includes(normalizedSearch))
+    );
+  }, [locations, normalizedSearch]);
+
   if (isLoading || !extinguisherSchema) {
     return (
       <View style={styles.centered}>
@@ -206,6 +233,28 @@ export default function ExtinguisherEditorScreen() {
   }
 
   const complete = isExtinguisherComplete(watchedValues);
+
+  function selectCatalogLocation(location: CatalogLocation) {
+    setValue('locationId', location.id, { shouldDirty: true });
+    setValue('locationNameSnapshot', location.name, { shouldDirty: true });
+    setValue('ubicacion', location.name, { shouldDirty: true });
+    setValue('customLocation', false, { shouldDirty: true });
+  }
+
+  function selectManualLocation() {
+    const currentName = getValues('ubicacion') || getValues('locationNameSnapshot');
+    setValue('locationId', null, { shouldDirty: true });
+    setValue('locationNameSnapshot', currentName, { shouldDirty: true });
+    setValue('ubicacion', currentName, { shouldDirty: true });
+    setValue('customLocation', true, { shouldDirty: true });
+  }
+
+  function updateManualLocation(value: string) {
+    setValue('locationId', null, { shouldDirty: true });
+    setValue('locationNameSnapshot', value, { shouldDirty: true });
+    setValue('ubicacion', value, { shouldDirty: true });
+    setValue('customLocation', true, { shouldDirty: true });
+  }
 
   return (
     <ScrollView
@@ -232,13 +281,79 @@ export default function ExtinguisherEditorScreen() {
       {extinguisherSchema.sections.map((section) => (
         <View key={section.id} style={styles.section}>
           <SectionHeader title={section.title} />
-          {section.fields.map((field) => (
-            <FormField
-              key={field.key}
-              field={field}
-              control={control}
-              readOnly={isReadOnly}
-            />
+          {section.fields.map((field) => field.key === 'ubicacion' ? (
+            <View key={field.key} style={styles.locationField}>
+              <Text style={styles.fieldLabel}>Ubicación</Text>
+              {isReadOnly ? (
+                <View style={styles.readOnlyInput}>
+                  <Text style={styles.readOnlyInputText}>
+                    {watchedValues.locationNameSnapshot || watchedValues.ubicacion || 'Sin ubicación'}
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  {locations.length > 0 && (
+                    <>
+                      <TextInput
+                        style={styles.searchInput}
+                        value={locationSearch}
+                        onChangeText={setLocationSearch}
+                        placeholder="Buscar ubicación"
+                        placeholderTextColor="#94a3b8"
+                        autoCapitalize="none"
+                      />
+                      <View style={styles.locationOptions}>
+                        {filteredLocations.map((location) => {
+                          const selected = watchedValues.locationId === location.id && !watchedValues.customLocation;
+                          return (
+                            <TouchableOpacity
+                              key={location.id}
+                              style={[styles.locationOption, selected && styles.selectedLocationOption]}
+                              onPress={() => selectCatalogLocation(location)}
+                              accessibilityRole="radio"
+                              accessibilityState={{ selected }}
+                            >
+                              <Text style={[styles.locationName, selected && styles.selectedLocationName]}>{location.name}</Text>
+                              {!![location.area, location.floor].filter(Boolean).length && (
+                                <Text style={styles.locationDetail}>
+                                  {[location.area, location.floor].filter(Boolean).join(' · ')}
+                                </Text>
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                        {filteredLocations.length === 0 && (
+                          <Text style={styles.locationEmpty}>No se encontraron ubicaciones.</Text>
+                        )}
+                      </View>
+                    </>
+                  )}
+                  {locations.length === 0 && (
+                    <Text style={styles.locationHelp}>
+                      No hay ubicaciones de extintores en el catálogo para esta empresa o sucursal.
+                    </Text>
+                  )}
+                  <TouchableOpacity
+                    style={[styles.manualLocationButton, watchedValues.customLocation && styles.selectedManualButton]}
+                    onPress={selectManualLocation}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.manualLocationButtonText}>+ Usar otra ubicación</Text>
+                  </TouchableOpacity>
+                  {watchedValues.customLocation && (
+                    <TextInput
+                      style={styles.manualInput}
+                      value={watchedValues.ubicacion ?? ''}
+                      onChangeText={updateManualLocation}
+                      placeholder="Escribe la ubicación"
+                      placeholderTextColor="#94a3b8"
+                    />
+                  )}
+                </>
+              )}
+            </View>
+          ) : (
+            <FormField key={field.key} field={field} control={control} readOnly={isReadOnly} />
           ))}
         </View>
       ))}
@@ -272,6 +387,23 @@ const styles = StyleSheet.create({
   saving: { color: '#2563eb', fontSize: 12, fontWeight: '700' },
   error: { color: '#dc2626', fontSize: 12, fontWeight: '700' },
   section: { backgroundColor: '#ffffff', borderTopWidth: 1, borderBottomWidth: 1, borderColor: '#e5e7eb' },
+  locationField: { paddingHorizontal: 16, paddingVertical: 12, gap: 9 },
+  fieldLabel: { color: '#334155', fontSize: 14, fontWeight: '700' },
+  searchInput: { minHeight: 46, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, paddingHorizontal: 12, color: '#0f172a', backgroundColor: '#ffffff' },
+  locationOptions: { gap: 7 },
+  locationOption: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, backgroundColor: '#f8fafc' },
+  selectedLocationOption: { borderColor: '#2563eb', backgroundColor: '#eff6ff' },
+  locationName: { color: '#1e293b', fontSize: 14, fontWeight: '700' },
+  selectedLocationName: { color: '#1d4ed8' },
+  locationDetail: { marginTop: 2, color: '#64748b', fontSize: 12 },
+  locationEmpty: { paddingVertical: 7, color: '#64748b', fontSize: 12 },
+  locationHelp: { color: '#64748b', fontSize: 12, lineHeight: 17 },
+  manualLocationButton: { minHeight: 46, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#f59e0b', borderRadius: 10, backgroundColor: '#fff7ed' },
+  selectedManualButton: { borderColor: '#c2410c', backgroundColor: '#ffedd5' },
+  manualLocationButtonText: { color: '#c2410c', fontSize: 14, fontWeight: '800' },
+  manualInput: { minHeight: 46, borderWidth: 1, borderColor: '#f59e0b', borderRadius: 10, paddingHorizontal: 12, color: '#0f172a', backgroundColor: '#ffffff' },
+  readOnlyInput: { minHeight: 46, justifyContent: 'center', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, paddingHorizontal: 12, backgroundColor: '#f1f5f9' },
+  readOnlyInputText: { color: '#475569', fontSize: 14 },
   saveButton: { minHeight: 52, marginHorizontal: 16, marginTop: 10, borderRadius: 12, backgroundColor: '#1f3f66', alignItems: 'center', justifyContent: 'center' },
   disabledButton: { opacity: 0.5 },
   saveButtonText: { color: '#ffffff', fontSize: 16, fontWeight: '800' },

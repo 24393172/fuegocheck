@@ -13,6 +13,8 @@ import * as Sharing from 'expo-sharing';
 import { loadSettings, saveSettings } from '../../lib/settings-manager';
 import { generateMasterExcel } from '../../lib/excel-generator';
 import { APP_VERSION } from '../../constants/config';
+import { getCatalogStatus, syncCatalog } from '../../services/catalog-sync';
+import { CatalogStatus } from '../../types/catalog.types';
 
 // Simple format check — good enough to catch typos before the composer opens.
 function isValidEmail(email: string): boolean {
@@ -25,6 +27,8 @@ export default function SettingsScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
+  const [catalogStatus, setCatalogStatus] = useState<CatalogStatus | null>(null);
 
   useEffect(() => {
     loadSettings()
@@ -34,7 +38,30 @@ export default function SettingsScreen() {
       })
       .catch(console.error)
       .finally(() => setIsLoading(false));
+    getCatalogStatus().then(setCatalogStatus).catch(console.error);
   }, []);
+
+  async function handleCatalogSync() {
+    if (isSyncingCatalog) return;
+    try {
+      setIsSyncingCatalog(true);
+      const status = await syncCatalog();
+      setCatalogStatus(status);
+      Alert.alert(
+        'Catálogo actualizado',
+        'Catálogo actualizado correctamente.\nLas empresas y ubicaciones ya están disponibles sin conexión.'
+      );
+    } catch (error) {
+      console.error('[settings] Catalog sync failed:', error);
+      setCatalogStatus(await getCatalogStatus().catch(() => catalogStatus));
+      Alert.alert(
+        'Servidor no disponible',
+        'No se encontró el servidor local.\nPuedes continuar usando el último catálogo guardado en el dispositivo.'
+      );
+    } finally {
+      setIsSyncingCatalog(false);
+    }
+  }
 
   async function handleSave() {
     if (!technicianName.trim()) {
@@ -144,6 +171,49 @@ export default function SettingsScreen() {
           {isSaving ? 'Guardando...' : 'Guardar'}
         </Text>
       </TouchableOpacity>
+
+      <Text style={styles.sectionTitle}>Catálogo local</Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Empresas y ubicaciones para uso sin conexión</Text>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Última actualización</Text>
+          <Text style={styles.infoValue}>
+            {catalogStatus?.lastSync
+              ? new Date(catalogStatus.lastSync).toLocaleString('es-MX', {
+                  day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+                })
+              : 'Nunca'}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Empresas</Text>
+          <Text style={styles.infoValue}>{catalogStatus?.companies ?? 0}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Extintores</Text>
+          <Text style={styles.infoValue}>{catalogStatus?.extinguisherLocations ?? 0} ubicaciones</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Hidrantes</Text>
+          <Text style={styles.infoValue}>{catalogStatus?.hydrantLocations ?? 0} ubicaciones</Text>
+        </View>
+        <View style={[styles.infoRow, { borderBottomWidth: 0 }]}>
+          <Text style={styles.infoLabel}>Servidor local</Text>
+          <Text style={[styles.infoValue, styles.serverValue]} numberOfLines={2}>
+            {catalogStatus?.serverUrl ?? 'No configurado'}
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={[styles.saveButton, isSyncingCatalog && styles.buttonDisabled]}
+          onPress={handleCatalogSync}
+          disabled={isSyncingCatalog}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.saveButtonText}>
+            {isSyncingCatalog ? 'Actualizando catálogo...' : 'Actualizar empresas y ubicaciones'}
+          </Text>
+        </TouchableOpacity>
+      </View>
 
       <Text style={styles.sectionTitle}>Exportar datos</Text>
       <View style={styles.card}>
@@ -267,4 +337,5 @@ const styles = StyleSheet.create({
     color: '#6b7280',
     fontWeight: '500',
   },
+  serverValue: { flex: 1, marginLeft: 12, textAlign: 'right' },
 });

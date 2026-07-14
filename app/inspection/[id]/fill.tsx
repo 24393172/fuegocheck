@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Alert,
   ActivityIndicator,
+  TextInput,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useForm, FieldValues, useWatch } from 'react-hook-form';
@@ -14,12 +15,14 @@ import { Inspection, Photo } from '../../../types/inspection.types';
 import { FormSchema } from '../../../types/form.types';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
-import { parseFormData } from '../../../lib/form-data';
+import { getSiteData, parseFormData } from '../../../lib/form-data';
 import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
 import SectionHeader from '../../../components/ui/SectionHeader';
+import { CatalogLocation } from '../../../types/catalog.types';
+import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
 
 // Photos are stored per pump so they don't collide between the pumps of one
 // inspection: the field_key is prefixed with the pump id (e.g. "diesel:photo_general").
@@ -57,6 +60,8 @@ export default function FillScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [photosByKey, setPhotosByKey] = useState<Record<string, Photo>>({});
   const [isReadOnly, setIsReadOnly] = useState(readonly === '1');
+  const [catalogLocations, setCatalogLocations] = useState<CatalogLocation[]>([]);
+  const [locationSearch, setLocationSearch] = useState('');
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingValuesRef = useRef<FieldValues | null>(null);
@@ -64,8 +69,16 @@ export default function FillScreen() {
   // slice, so the other pumps and the site data are never overwritten.
   const fullDataRef = useRef<Record<string, unknown>>({});
 
-  const { control, watch, reset } = useForm<FieldValues>({ defaultValues: {} });
+  const { control, watch, reset, setValue, getValues } = useForm<FieldValues>({ defaultValues: {} });
   const watchedValues = useWatch({ control });
+  const normalizedLocationSearch = locationSearch.trim().toLocaleLowerCase('es-MX');
+  const filteredCatalogLocations = useMemo(() => {
+    if (!normalizedLocationSearch) return catalogLocations;
+    return catalogLocations.filter((location) =>
+      [location.name, location.area, location.floor, location.reference]
+        .some((value) => value.toLocaleLowerCase('es-MX').includes(normalizedLocationSearch))
+    );
+  }, [catalogLocations, normalizedLocationSearch]);
 
   useEffect(() => {
     async function load() {
@@ -104,7 +117,32 @@ export default function FillScreen() {
         setSchema(s);
         setPhotosByKey(pumpPhotos);
         const pumps = fullData.pumps as Record<string, Record<string, unknown>>;
-        reset(pumps[pump] ?? {});
+        const currentValues = { ...(pumps[pump] ?? {}) };
+        if (pump === 'hidrantes') {
+          const legacyLocation = typeof currentValues.ubicacion === 'string' ? currentValues.ubicacion : '';
+          const existingLocationId = typeof currentValues.locationId === 'string' && currentValues.locationId
+            ? currentValues.locationId
+            : null;
+          currentValues.locationId = existingLocationId;
+          currentValues.locationNameSnapshot =
+            typeof currentValues.locationNameSnapshot === 'string'
+              ? currentValues.locationNameSnapshot
+              : legacyLocation;
+          currentValues.customLocation = currentValues.customLocation === true || (!existingLocationId && !!legacyLocation);
+
+          const site = getSiteData(insp);
+          if (site.companyId) {
+            try {
+              setCatalogLocations(site.branchId
+                ? await getLocationsByBranch(site.branchId, 'hydrant')
+                : await getLocationsByCompany(site.companyId, 'hydrant'));
+            } catch (error) {
+              console.error('[fill] Failed to load hydrant locations:', error);
+              setCatalogLocations([]);
+            }
+          }
+        }
+        reset(currentValues);
       } catch (error) {
         console.error('[fill] Failed to load:', error);
         Alert.alert('Error', 'No se pudo cargar la bomba.');
@@ -178,6 +216,95 @@ export default function FillScreen() {
             }
             readOnly={isReadOnly}
           />
+        </View>
+      );
+    }
+
+    if (pump === 'hidrantes' && field.key === 'ubicacion') {
+      const selectedLocationId = typeof watchedValues.locationId === 'string' ? watchedValues.locationId : null;
+      const customLocation = watchedValues.customLocation === true;
+      const locationName = typeof watchedValues.locationNameSnapshot === 'string'
+        ? watchedValues.locationNameSnapshot
+        : typeof watchedValues.ubicacion === 'string' ? watchedValues.ubicacion : '';
+      return (
+        <View key={field.key} style={styles.locationField}>
+          <Text style={styles.mediaLabel}>Ubicación</Text>
+          {isReadOnly ? (
+            <View style={styles.readOnlyLocation}>
+              <Text style={styles.readOnlyLocationText}>{locationName || 'Sin ubicación'}</Text>
+            </View>
+          ) : (
+            <>
+              {catalogLocations.length > 0 && (
+                <>
+                  <TextInput
+                    style={styles.locationSearch}
+                    value={locationSearch}
+                    onChangeText={setLocationSearch}
+                    placeholder="Buscar ubicación"
+                    placeholderTextColor="#94a3b8"
+                    autoCapitalize="none"
+                  />
+                  <View style={styles.locationOptions}>
+                    {filteredCatalogLocations.map((location) => {
+                      const selected = selectedLocationId === location.id && !customLocation;
+                      return (
+                        <TouchableOpacity
+                          key={location.id}
+                          style={[styles.locationOption, selected && styles.selectedLocationOption]}
+                          onPress={() => {
+                            setValue('locationId', location.id, { shouldDirty: true });
+                            setValue('locationNameSnapshot', location.name, { shouldDirty: true });
+                            setValue('ubicacion', location.name, { shouldDirty: true });
+                            setValue('customLocation', false, { shouldDirty: true });
+                          }}
+                          accessibilityRole="radio"
+                          accessibilityState={{ selected }}
+                        >
+                          <Text style={[styles.locationName, selected && styles.selectedLocationName]}>{location.name}</Text>
+                          {!![location.area, location.floor].filter(Boolean).length && (
+                            <Text style={styles.locationDetail}>{[location.area, location.floor].filter(Boolean).join(' · ')}</Text>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                    {filteredCatalogLocations.length === 0 && (
+                      <Text style={styles.locationHelp}>No se encontraron ubicaciones.</Text>
+                    )}
+                  </View>
+                </>
+              )}
+              {catalogLocations.length === 0 && (
+                <Text style={styles.locationHelp}>No hay ubicaciones de hidrantes para esta empresa o sucursal.</Text>
+              )}
+              <TouchableOpacity
+                style={[styles.manualLocationButton, customLocation && styles.selectedManualLocation]}
+                onPress={() => {
+                  const current = String(getValues('ubicacion') ?? getValues('locationNameSnapshot') ?? '');
+                  setValue('locationId', null, { shouldDirty: true });
+                  setValue('locationNameSnapshot', current, { shouldDirty: true });
+                  setValue('ubicacion', current, { shouldDirty: true });
+                  setValue('customLocation', true, { shouldDirty: true });
+                }}
+              >
+                <Text style={styles.manualLocationText}>+ Usar otra ubicación</Text>
+              </TouchableOpacity>
+              {customLocation && (
+                <TextInput
+                  style={styles.manualLocationInput}
+                  value={typeof watchedValues.ubicacion === 'string' ? watchedValues.ubicacion : ''}
+                  onChangeText={(value) => {
+                    setValue('locationId', null, { shouldDirty: true });
+                    setValue('locationNameSnapshot', value, { shouldDirty: true });
+                    setValue('ubicacion', value, { shouldDirty: true });
+                    setValue('customLocation', true, { shouldDirty: true });
+                  }}
+                  placeholder="Escribe la ubicación"
+                  placeholderTextColor="#94a3b8"
+                />
+              )}
+            </>
+          )}
         </View>
       );
     }
@@ -286,6 +413,21 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     textAlign: 'right',
   },
+  locationField: { paddingHorizontal: 16, paddingVertical: 12, gap: 9, backgroundColor: '#ffffff' },
+  locationSearch: { minHeight: 46, borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 10, paddingHorizontal: 12, color: '#0f172a' },
+  locationOptions: { gap: 7 },
+  locationOption: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, backgroundColor: '#f8fafc' },
+  selectedLocationOption: { borderColor: '#2563eb', backgroundColor: '#eff6ff' },
+  locationName: { color: '#1e293b', fontSize: 14, fontWeight: '700' },
+  selectedLocationName: { color: '#1d4ed8' },
+  locationDetail: { marginTop: 2, color: '#64748b', fontSize: 12 },
+  locationHelp: { color: '#64748b', fontSize: 12, lineHeight: 17 },
+  manualLocationButton: { minHeight: 46, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#f59e0b', borderRadius: 10, backgroundColor: '#fff7ed' },
+  selectedManualLocation: { borderColor: '#c2410c', backgroundColor: '#ffedd5' },
+  manualLocationText: { color: '#c2410c', fontSize: 14, fontWeight: '800' },
+  manualLocationInput: { minHeight: 46, borderWidth: 1, borderColor: '#f59e0b', borderRadius: 10, paddingHorizontal: 12, color: '#0f172a', backgroundColor: '#ffffff' },
+  readOnlyLocation: { minHeight: 46, justifyContent: 'center', borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 10, paddingHorizontal: 12, backgroundColor: '#f1f5f9' },
+  readOnlyLocationText: { color: '#475569', fontSize: 14 },
   readOnlyText: { fontSize: 12, color: '#92400e', fontWeight: '600' },
   saveErrorBanner: {
     backgroundColor: '#dc2626',

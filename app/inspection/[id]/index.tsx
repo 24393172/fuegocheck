@@ -217,7 +217,10 @@ export default function InspectionIndexScreen() {
       const siteData = getSiteData(currentInspection);
       await syncExtinguisherInspection({
         inspectionId: currentInspection.id,
-        company: { id: null, name: siteData.cliente || currentInspection.client_name },
+        company: {
+          id: siteData.companyId ?? null,
+          name: siteData.companyNameSnapshot || siteData.cliente || currentInspection.client_name,
+        },
         date: inspectionDateToIso(siteData.fecha),
         technician: { id: null, name: siteData.tecnico || currentInspection.technician_name },
         extinguishers,
