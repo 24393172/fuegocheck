@@ -5,10 +5,11 @@
 import * as XLSX from 'xlsx/dist/xlsx.full.min.js';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getInspection, getAllInspections } from './repositories/inspections.repo';
-import { INSPECTION_SCHEMAS, PUMP_SCHEMAS } from '../schemas';
+import { INSPECTION_SCHEMAS } from '../schemas';
 import { FormSchema, FormField } from '../types/form.types';
 import { InspectionStatus } from '../types/inspection.types';
 import { parseFormData, getSiteData } from './form-data';
+import { normalizeSelectedFormatIds, schemasForSelectedFormatIds } from './inspection-formats';
 
 // Short, Excel-safe sheet names (max 31 chars, no : \ / ? * [ ]).
 const SHEET_NAME: Record<string, string> = {
@@ -190,12 +191,8 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
   const fullData = parseFormData(inspection);
   const pumps = (fullData.pumps ?? {}) as Record<string, Record<string, unknown>>;
   const site = getSiteData(inspection);
-  const selectedFormatIds = Array.isArray(fullData.selectedFormatIds)
-    ? fullData.selectedFormatIds.filter((x): x is string => typeof x === 'string')
-    : [];
-  const reportSchemas = selectedFormatIds.length > 0
-    ? INSPECTION_SCHEMAS.filter((schema) => selectedFormatIds.includes(schema.id))
-    : PUMP_SCHEMAS;
+  const selectedFormatIds = normalizeSelectedFormatIds(fullData.selectedFormatIds);
+  const reportSchemas = schemasForSelectedFormatIds(selectedFormatIds);
 
   const wb = XLSX.utils.book_new();
 
@@ -217,7 +214,7 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
       ['Cliente', site.cliente],
       ['Área', site.area],
       ['Fecha', site.fecha],
-      ['(Sin bombas con datos)'],
+      ['(Sin formatos con datos)'],
     ]);
     XLSX.utils.book_append_sheet(wb, ws, 'Inspección');
   }

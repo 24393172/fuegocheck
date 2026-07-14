@@ -1,8 +1,9 @@
 export type InspectionStatus = 'draft' | 'pending' | 'completed' | 'sent';
+export type SyncStatus = 'pending' | 'syncing' | 'synced' | 'error';
 
-// A site inspection (form_type 'site_v1') stores its data as this shape inside
-// form_data: shared site fields plus one answers object per pump, keyed by the
-// pump schema id ('jockey' | 'diesel' | 'electrica').
+// A site inspection (form_type 'site_v1') stores shared site data once and a
+// collection of formats. Answers are isolated by schema id inside `pumps`; the
+// historical property name is kept to avoid breaking existing inspections.
 export interface SiteData {
   cliente: string;
   atencion: string;
@@ -13,6 +14,8 @@ export interface SiteData {
 
 export interface SiteFormData {
   site: SiteData;
+  // Optional only for backwards compatibility. Legacy records without this
+  // property are interpreted as the complete Bombas group.
   selectedFormatIds?: string[];
   pumps: Record<string, Record<string, unknown>>;
 }
@@ -30,10 +33,15 @@ export interface Inspection {
   location: string;
   status: InspectionStatus;
   pending_comment: string | null;
+  pinned: boolean;
   form_data: string;
   created_at: number;
   updated_at: number;
   sent_at: number | null;
+  sync_status: SyncStatus;
+  last_sync_attempt: number | null;
+  synced_at: number | null;
+  sync_error: string | null;
 }
 
 // Lightweight row for list screens (dashboard, history). Excludes the heavy
@@ -45,7 +53,9 @@ export interface InspectionListItem {
   location: string;
   status: InspectionStatus;
   pending_comment: string | null;
+  pinned: boolean;
   created_at: number;
+  updated_at: number;
 }
 
 export interface Photo {

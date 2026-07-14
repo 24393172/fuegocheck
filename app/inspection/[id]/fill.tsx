@@ -69,6 +69,10 @@ export default function FillScreen() {
 
   useEffect(() => {
     async function load() {
+      if (pump === 'extintores') {
+        router.replace(`/inspection/${id}/extinguishers${readonly === '1' ? '?readonly=1' : ''}`);
+        return;
+      }
       try {
         const s = INSPECTION_SCHEMAS.find((x) => x.id === pump) ?? null;
         if (!s) {

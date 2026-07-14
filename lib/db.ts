@@ -29,10 +29,15 @@ export async function initializeDatabase(): Promise<void> {
       location TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'draft',
       pending_comment TEXT,
+      pinned INTEGER NOT NULL DEFAULT 0,
       form_data TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
-      sent_at INTEGER
+      sent_at INTEGER,
+      sync_status TEXT NOT NULL DEFAULT 'pending',
+      last_sync_attempt INTEGER,
+      synced_at INTEGER,
+      sync_error TEXT
     );
 
     CREATE TABLE IF NOT EXISTS photos (
@@ -93,23 +98,46 @@ export async function initializeDatabase(): Promise<void> {
   if (!inspectionColumns.some((column) => column.name === 'pending_comment')) {
     await database.execAsync('ALTER TABLE inspections ADD COLUMN pending_comment TEXT;');
   }
+  if (!inspectionColumns.some((column) => column.name === 'pinned')) {
+    await database.execAsync(
+      'ALTER TABLE inspections ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;'
+    );
+  }
+  if (!inspectionColumns.some((column) => column.name === 'sync_status')) {
+    await database.execAsync("ALTER TABLE inspections ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'pending';");
+  }
+  if (!inspectionColumns.some((column) => column.name === 'last_sync_attempt')) {
+    await database.execAsync('ALTER TABLE inspections ADD COLUMN last_sync_attempt INTEGER;');
+  }
+  if (!inspectionColumns.some((column) => column.name === 'synced_at')) {
+    await database.execAsync('ALTER TABLE inspections ADD COLUMN synced_at INTEGER;');
+  }
+  if (!inspectionColumns.some((column) => column.name === 'sync_error')) {
+    await database.execAsync('ALTER TABLE inspections ADD COLUMN sync_error TEXT;');
+  }
+  await database.execAsync(`
+    CREATE INDEX IF NOT EXISTS idx_inspections_pinned_updated
+    ON inspections(pinned DESC, updated_at DESC);
+  `);
 
   const now = Date.now();
-  await database.runAsync(
-    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    ['company-park-royal-cancun', 'Park Royal Cancun', 'Cuarto de Maquinas', 'Ing. Luis Santos', now]
-  );
-  await database.runAsync(
-    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    ['company-hotel-cancun-centro', 'Hotel Cancun Centro', 'Lobby principal', 'Mantenimiento', now]
-  );
-  await database.runAsync(
-    `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
-     VALUES (?, ?, ?, ?, ?)`,
-    ['company-plaza-las-americas', 'Plaza Las Americas', 'Area comercial', 'Administracion', now]
-  );
+  const sampleCompanies = [
+    ['company-park-royal-cancun', 'Park Royal Cancun', 'Cuarto de Máquinas', 'Ing. Luis Santos'],
+    ['company-hotel-cancun-centro', 'Hotel Cancun Centro', 'Lobby principal', 'Mantenimiento'],
+    ['company-plaza-las-americas', 'Plaza Las Américas', 'Área comercial', 'Administración'],
+    ['company-hotel-mar-azul', 'Hotel Mar Azul', 'Casa de máquinas', 'Arq. Fernanda Ruiz'],
+    ['company-hospital-san-gabriel', 'Hospital San Gabriel', 'Servicios generales', 'Ing. Carlos Méndez'],
+    ['company-bodega-caribe', 'Bodega Caribe', 'Nave industrial', 'Jefatura de mantenimiento'],
+    ['company-torre-kukulkan', 'Torre Empresarial Kukulkán', 'Sótano técnico', 'Administración del edificio'],
+  ] as const;
+
+  for (const [id, name, area, attention] of sampleCompanies) {
+    await database.runAsync(
+      `INSERT OR IGNORE INTO companies (id, name, area, attention, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [id, name, area, attention, now]
+    );
+  }
 
   // Migrate any legacy 'pending_sync' records to 'completed' — the sync queue
   // no longer exists; sharing is now done manually via the mail composer.
@@ -117,5 +145,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 2;');
+  await database.execAsync('PRAGMA user_version = 3;');
 }

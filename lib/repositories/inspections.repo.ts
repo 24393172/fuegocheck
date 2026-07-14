@@ -1,12 +1,25 @@
 import { getDatabase } from '../db';
 import { generateId } from '../uuid';
-import { Inspection, InspectionListItem, InspectionStatus } from '../../types/inspection.types';
-import { deletePhotosByInspection } from './photos.repo';
-import { deleteSignaturesByInspection } from './signatures.repo';
+import { Inspection, InspectionListItem, InspectionStatus, SyncStatus } from '../../types/inspection.types';
 import { deleteAllPhotosForInspection } from '../photo-manager';
 import { deleteAttachmentFilesForInspection } from '../attachment-files';
 
-type CreateInspectionInput = Omit<Inspection, 'id' | 'created_at' | 'updated_at' | 'sent_at'>;
+type CreateInspectionInput = Omit<
+  Inspection,
+  'id' | 'pinned' | 'created_at' | 'updated_at' | 'sent_at' |
+  'sync_status' | 'last_sync_attempt' | 'synced_at' | 'sync_error'
+>;
+
+type InspectionRow = Omit<Inspection, 'pinned'> & { pinned: number };
+type InspectionListRow = Omit<InspectionListItem, 'pinned'> & { pinned: number };
+
+function mapInspection(row: InspectionRow): Inspection {
+  return { ...row, pinned: row.pinned === 1 };
+}
+
+function mapInspectionListItem(row: InspectionListRow): InspectionListItem {
+  return { ...row, pinned: row.pinned === 1 };
+}
 
 export interface InspectionFilters {
   statuses?: InspectionStatus[];
@@ -14,6 +27,7 @@ export interface InspectionFilters {
   createdFrom?: number;
   createdTo?: number;
   limit?: number;
+  prioritizePinned?: boolean;
 }
 
 export async function createInspection(input: CreateInspectionInput): Promise<Inspection> {
@@ -22,9 +36,14 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
   const inspection: Inspection = {
     id: generateId(),
     ...input,
+    pinned: false,
     created_at: now,
     updated_at: now,
     sent_at: null,
+    sync_status: 'pending',
+    last_sync_attempt: null,
+    synced_at: null,
+    sync_error: null,
   };
 
   await db.runAsync(
@@ -52,13 +71,18 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
 
 export async function getInspection(id: string): Promise<Inspection | null> {
   const db = getDatabase();
-  return db.getFirstAsync<Inspection>('SELECT * FROM inspections WHERE id = ?', [id]);
+  const row = await db.getFirstAsync<InspectionRow>('SELECT * FROM inspections WHERE id = ?', [id]);
+  return row ? mapInspection(row) : null;
 }
 
 // Full records including form_data — only for exports (master Excel).
 export async function getAllInspections(): Promise<Inspection[]> {
   const db = getDatabase();
-  return db.getAllAsync<Inspection>('SELECT * FROM inspections ORDER BY created_at DESC', []);
+  const rows = await db.getAllAsync<InspectionRow>(
+    'SELECT * FROM inspections ORDER BY created_at DESC',
+    []
+  );
+  return rows.map(mapInspection);
 }
 
 // List screens only need these columns. Skipping form_data (a ~90-field JSON
@@ -75,11 +99,14 @@ export async function getInspectionsForList(limitOrFilters?: number | Inspection
   if (filters.clientName?.trim()) { where.push('client_name LIKE ?'); params.push(`%${filters.clientName.trim()}%`); }
   if (filters.createdFrom !== undefined) { where.push('created_at >= ?'); params.push(filters.createdFrom); }
   if (filters.createdTo !== undefined) { where.push('created_at <= ?'); params.push(filters.createdTo); }
-  let sql = `SELECT id, technician_name, client_name, location, status, pending_comment, created_at FROM inspections`;
+  let sql = `SELECT id, technician_name, client_name, location, status, pending_comment, pinned, created_at, updated_at FROM inspections`;
   if (where.length) sql += ` WHERE ${where.join(' AND ')}`;
-  sql += ' ORDER BY created_at DESC';
+  sql += filters.prioritizePinned
+    ? ' ORDER BY pinned DESC, updated_at DESC'
+    : ' ORDER BY created_at DESC';
   if (filters.limit !== undefined) { sql += ' LIMIT ?'; params.push(filters.limit); }
-  return db.getAllAsync<InspectionListItem>(sql, params);
+  const rows = await db.getAllAsync<InspectionListRow>(sql, params);
+  return rows.map(mapInspectionListItem);
 }
 
 // Dashboard stats without loading any rows into memory.
@@ -101,7 +128,15 @@ export async function updateInspection(
   fields: Partial<Omit<Inspection, 'id' | 'created_at'>>
 ): Promise<void> {
   const db = getDatabase();
-  const updates = { ...fields, updated_at: Date.now() };
+  const updates: Partial<Omit<Inspection, 'id' | 'created_at'>> & { updated_at: number } = {
+    ...fields,
+    updated_at: Date.now(),
+  };
+  if (fields.form_data !== undefined) {
+    updates.sync_status = 'pending';
+    updates.synced_at = null;
+    updates.sync_error = null;
+  }
   const columns = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
   const values = [...Object.values(updates), id];
 
@@ -116,9 +151,40 @@ export async function updateStatus(id: string, status: InspectionStatus, pending
   const comment = pendingComment?.trim() ?? '';
   if (status === 'pending' && !comment) throw new Error('PENDING_COMMENT_REQUIRED');
   await db.runAsync(
-    'UPDATE inspections SET status = ?, pending_comment = ?, updated_at = ?, sent_at = ? WHERE id = ?',
-    [status, status === 'pending' ? comment : null, now, sent_at, id]
+    `UPDATE inspections
+     SET status = ?, pending_comment = ?, updated_at = ?, sent_at = ?,
+         pinned = CASE WHEN ? IN ('draft', 'pending') THEN pinned ELSE 0 END
+     WHERE id = ?`,
+    [status, status === 'pending' ? comment : null, now, sent_at, status, id]
   );
+}
+
+export async function updateSyncState(
+  id: string,
+  status: SyncStatus,
+  errorMessage: string | null = null
+): Promise<void> {
+  const db = getDatabase();
+  const now = Date.now();
+  await db.runAsync(
+    `UPDATE inspections
+     SET sync_status = ?,
+         last_sync_attempt = ?,
+         synced_at = CASE WHEN ? = 'synced' THEN ? ELSE synced_at END,
+         sync_error = ?
+     WHERE id = ?`,
+    [status, now, status, now, status === 'error' ? errorMessage?.slice(0, 1000) ?? 'Unknown sync error' : null, id]
+  );
+}
+
+export async function setInspectionPinned(id: string, pinned: boolean): Promise<void> {
+  const db = getDatabase();
+  const result = await db.runAsync(
+    `UPDATE inspections SET pinned = ?
+     WHERE id = ? AND status IN ('draft', 'pending')`,
+    [pinned ? 1 : 0, id]
+  );
+  if (result.changes !== 1) throw new Error('EDITABLE_INSPECTION_NOT_FOUND');
 }
 
 export async function deleteInspection(id: string): Promise<void> {
@@ -129,15 +195,32 @@ export async function deleteInspection(id: string): Promise<void> {
 // Deletes an inspection and everything attached to it: photo rows, signature
 // rows, the inspection row, and the physical photo files on disk. Use this
 // instead of deleteInspection() to avoid orphaned rows and leftover files.
-export async function deleteInspectionCompletely(id: string): Promise<void> {
-  await deletePhotosByInspection(id);
-  await deleteSignaturesByInspection(id);
-  await deleteInspection(id);
+export async function deleteInspectionCompletely(
+  id: string,
+  requiredStatus?: InspectionStatus
+): Promise<void> {
+  const db = getDatabase();
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    if (requiredStatus) {
+      const row = await transaction.getFirstAsync<{ status: InspectionStatus }>(
+        'SELECT status FROM inspections WHERE id = ?',
+        [id]
+      );
+      if (!row || row.status !== requiredStatus) {
+        throw new Error('INSPECTION_STATUS_CHANGED');
+      }
+    }
+    await transaction.runAsync('DELETE FROM photos WHERE inspection_id = ?', [id]);
+    await transaction.runAsync('DELETE FROM signatures WHERE inspection_id = ?', [id]);
+    await transaction.runAsync('DELETE FROM inspections WHERE id = ?', [id]);
+  });
   // Physical files are best-effort — a failure here shouldn't block the delete.
   await deleteAllPhotosForInspection(id).catch((error) =>
     console.error('[inspections.repo] Could not delete photo files:', error)
   );
   // Shared email files (Excel + signature PNGs) persist after sharing so Gmail
   // can finish sending; remove them when the inspection goes away.
-  await deleteAttachmentFilesForInspection(id);
+  await deleteAttachmentFilesForInspection(id).catch((error) =>
+    console.error('[inspections.repo] Could not delete attachment files:', error)
+  );
 }

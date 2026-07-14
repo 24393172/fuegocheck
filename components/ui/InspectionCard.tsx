@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { InspectionListItem } from '../../types/inspection.types';
 import StatusBadge from './StatusBadge';
 
@@ -8,6 +9,7 @@ import StatusBadge from './StatusBadge';
 interface Props {
   inspection: InspectionListItem;
   onPress: () => void;
+  showPinnedIndicator?: boolean;
 }
 
 function formatDate(timestampMs: number): string {
@@ -18,14 +20,29 @@ function formatDate(timestampMs: number): string {
   });
 }
 
-export default memo(function InspectionCard({ inspection, onPress }: Props) {
+export default memo(function InspectionCard({
+  inspection,
+  onPress,
+  showPinnedIndicator = false,
+}: Props) {
   return (
-    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.7}>
+    <TouchableOpacity
+      style={styles.card}
+      onPress={onPress}
+      activeOpacity={0.7}
+    >
       <View style={styles.top}>
         <Text style={styles.clientName} numberOfLines={1}>
           {inspection.client_name || 'Sin nombre'}
         </Text>
-        <StatusBadge status={inspection.status} />
+        <View style={styles.topActions}>
+          {showPinnedIndicator && inspection.pinned && (
+            <View accessible accessibilityLabel="Formulario fijado" style={styles.pinIndicator}>
+              <Ionicons name="pin" size={14} color="#2563eb" />
+            </View>
+          )}
+          <StatusBadge status={inspection.status} />
+        </View>
       </View>
       <Text style={styles.location} numberOfLines={1}>
         {inspection.location || 'Sin ubicación'}
@@ -67,6 +84,19 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#111827',
+  },
+  topActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  pinIndicator: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#dbeafe',
   },
   location: {
     fontSize: 13,
