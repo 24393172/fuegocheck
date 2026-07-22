@@ -38,6 +38,10 @@ export const extinguisherInspectionSchema = z.object({
     id: id.nullish(),
     name: z.string().trim().min(1).max(200),
   }).strict(),
+  branch: z.object({
+    id: id.nullish(),
+    name: shortText,
+  }).strict().nullish(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must use YYYY-MM-DD'),
   technician: z.object({
     id: id.nullish(),
@@ -62,3 +66,69 @@ export const extinguisherInspectionSchema = z.object({
 
 export type ExtinguisherInspectionPayload = z.infer<typeof extinguisherInspectionSchema>;
 
+export const hydrantSchema = z.object({
+  id,
+  numero: z.string().trim().min(1).max(200),
+  locationId: id.nullish(),
+  locationNameSnapshot: z.string().trim().min(1).max(500),
+  customLocation: z.boolean(),
+  gabinete: checkValue,
+  gabinete_comentario: longText,
+  senalamiento: checkValue,
+  senalamiento_comentario: longText,
+  calcomania: checkValue,
+  calcomania_comentario: longText,
+  valvula_angular: checkValue,
+  valvula_angular_comentario: longText,
+  manguera: checkValue,
+  manguera_comentario: longText,
+  chiflon: checkValue,
+  chiflon_comentario: longText,
+  llave_acople: checkValue,
+  llave_acople_comentario: longText,
+  observaciones: longText,
+  createdAt: z.number().int().nonnegative().optional(),
+  updatedAt: z.number().int().nonnegative().optional(),
+}).strict().superRefine((hydrant, context) => {
+  if (hydrant.customLocation && hydrant.locationId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['locationId'],
+      message: 'A custom location cannot include locationId',
+    });
+  }
+});
+
+export const hydrantInspectionSchema = z.object({
+  inspectionId: id,
+  company: z.object({
+    id: id.nullish(),
+    name: z.string().trim().min(1).max(200),
+  }).strict(),
+  branch: z.object({
+    id: id.nullish(),
+    name: shortText,
+  }).strict().nullish(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must use YYYY-MM-DD'),
+  technician: z.object({
+    id: id.nullish(),
+    name: z.string().trim().min(1).max(200),
+  }).strict(),
+  hydrants: z.array(hydrantSchema).min(1).max(38),
+  sourceDeviceId: id.nullish(),
+  syncVersion: z.number().int().nonnegative(),
+}).strict().superRefine((payload, context) => {
+  const seen = new Set<string>();
+  payload.hydrants.forEach((hydrant, index) => {
+    if (seen.has(hydrant.id)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['hydrants', index, 'id'],
+        message: 'Duplicate hydrant id',
+      });
+    }
+    seen.add(hydrant.id);
+  });
+});
+
+export type HydrantInspectionPayload = z.infer<typeof hydrantInspectionSchema>;

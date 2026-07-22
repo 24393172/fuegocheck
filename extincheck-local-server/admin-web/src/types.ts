@@ -34,6 +34,7 @@ export interface Report {
   id: string;
   inspectionId: string;
   formatType: string;
+  formats: string;
   filename: string;
   generatedAt: string;
   status: 'generated' | 'error';

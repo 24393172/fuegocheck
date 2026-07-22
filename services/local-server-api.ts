@@ -1,13 +1,26 @@
 import { ExtinguisherRecord } from '../types/extinguisher.types';
+import { HydrantRecord } from '../types/hydrant.types';
 
 const REQUEST_TIMEOUT_MS = 7000;
 
 export interface ExtinguisherSyncPayload {
   inspectionId: string;
   company: { id: string | null; name: string };
+  branch?: { id: string | null; name: string } | null;
   date: string;
   technician: { id: string | null; name: string };
   extinguishers: ExtinguisherRecord[];
+  sourceDeviceId?: string;
+  syncVersion: number;
+}
+
+export interface HydrantSyncPayload {
+  inspectionId: string;
+  company: { id: string | null; name: string };
+  branch?: { id: string | null; name: string } | null;
+  date: string;
+  technician: { id: string | null; name: string };
+  hydrants: HydrantRecord[];
   sourceDeviceId?: string;
   syncVersion: number;
 }
@@ -27,7 +40,8 @@ export interface SyncResponse {
   ok: true;
   created: boolean;
   inspectionId: string;
-  extinguishersReceived: number;
+  extinguishersReceived?: number;
+  hydrantsReceived?: number;
   syncedAt: string;
   report: {
     id: string;
@@ -147,6 +161,41 @@ export function syncExtinguisherInspection(
     extinguishers: payload.extinguishers.map(toExtinguisherServerRecord),
   };
   return requestLocalServer<SyncResponse>('/api/inspections/extinguishers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(serverPayload),
+  });
+}
+
+export function syncHydrantInspection(payload: HydrantSyncPayload): Promise<SyncResponse> {
+  const serverPayload = {
+    ...payload,
+    hydrants: payload.hydrants.map((record) => ({
+      id: record.id,
+      numero: record.numero,
+      locationId: record.locationId,
+      locationNameSnapshot: record.locationNameSnapshot || record.ubicacion,
+      customLocation: record.customLocation,
+      gabinete: record.gabinete,
+      gabinete_comentario: record.gabinete_comentario,
+      senalamiento: record.senalamiento,
+      senalamiento_comentario: record.senalamiento_comentario,
+      calcomania: record.calcomania,
+      calcomania_comentario: record.calcomania_comentario,
+      valvula_angular: record.valvula_angular,
+      valvula_angular_comentario: record.valvula_angular_comentario,
+      manguera: record.manguera,
+      manguera_comentario: record.manguera_comentario,
+      chiflon: record.chiflon,
+      chiflon_comentario: record.chiflon_comentario,
+      llave_acople: record.llave_acople,
+      llave_acople_comentario: record.llave_acople_comentario,
+      observaciones: record.observaciones,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    })),
+  };
+  return requestLocalServer<SyncResponse>('/api/inspections/hydrants', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(serverPayload),

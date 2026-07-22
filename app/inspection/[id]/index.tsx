@@ -16,6 +16,7 @@ import SignatureField from '../../../components/forms/SignatureField';
 import { getSiteData, parseFormData } from '../../../lib/form-data';
 import { extinguisherCollectionProgress } from '../../../lib/extinguishers';
 import { normalizeExtinguisherCollection } from '../../../lib/extinguishers';
+import { hydrantCollectionProgress, normalizeHydrantsData } from '../../../lib/hydrants';
 import {
   InspectionFormatOption,
   normalizeSelectedFormatIds,
@@ -31,11 +32,21 @@ import {
   inspectionDateToIso,
   LocalServerApiError,
   syncExtinguisherInspection,
+  syncHydrantInspection,
 } from '../../../services/local-server-api';
 
 function formatProgress(schema: FormSchema, data: Record<string, unknown>) {
   if (schema.id === 'extintores') {
     const progress = extinguisherCollectionProgress(data);
+    return {
+      total: progress.total,
+      answered: progress.completed,
+      hasAnyData: progress.hasAnyData,
+      complete: progress.complete,
+    };
+  }
+  if (schema.id === 'hidrantes') {
+    const progress = hydrantCollectionProgress(data);
     return {
       total: progress.total,
       answered: progress.completed,
@@ -194,11 +205,23 @@ export default function InspectionIndexScreen() {
       let currentInspection = inspection;
       let fullData = parseFormData(currentInspection);
       const pumps = (fullData.pumps ?? {}) as Record<string, unknown>;
-      const normalized = normalizeExtinguisherCollection(pumps.extintores);
-      if (normalized.changed) {
+      const selectedIds = normalizeSelectedFormatIds(fullData.selectedFormatIds);
+      const normalizedPumps = { ...pumps };
+      let normalizationChanged = false;
+      if (selectedIds.includes('extintores')) {
+        const normalized = normalizeExtinguisherCollection(pumps.extintores);
+        normalizedPumps.extintores = normalized.collection;
+        normalizationChanged = normalizationChanged || normalized.changed;
+      }
+      if (selectedIds.includes('hidrantes')) {
+        const normalized = normalizeHydrantsData(pumps.hidrantes);
+        normalizedPumps.hidrantes = normalized.collection;
+        normalizationChanged = normalizationChanged || normalized.changed;
+      }
+      if (normalizationChanged) {
         const normalizedFormData = JSON.stringify({
           ...fullData,
-          pumps: { ...pumps, extintores: normalized.collection },
+          pumps: normalizedPumps,
         });
         await updateInspection(id, { form_data: normalizedFormData });
         const refreshed = await getInspection(id);
@@ -213,19 +236,32 @@ export default function InspectionIndexScreen() {
 
       await checkServerHealth();
       const currentPumps = (fullData.pumps ?? {}) as Record<string, unknown>;
-      const extinguishers = normalizeExtinguisherCollection(currentPumps.extintores).collection.items;
       const siteData = getSiteData(currentInspection);
-      await syncExtinguisherInspection({
+      const commonPayload = {
         inspectionId: currentInspection.id,
         company: {
           id: siteData.companyId ?? null,
           name: siteData.companyNameSnapshot || siteData.cliente || currentInspection.client_name,
         },
+        branch: siteData.branchId || siteData.branchNameSnapshot
+          ? { id: siteData.branchId ?? null, name: siteData.branchNameSnapshot ?? '' }
+          : null,
         date: inspectionDateToIso(siteData.fecha),
         technician: { id: null, name: siteData.tecnico || currentInspection.technician_name },
-        extinguishers,
         syncVersion: currentInspection.updated_at,
-      });
+      };
+      if (selectedIds.includes('extintores')) {
+        await syncExtinguisherInspection({
+          ...commonPayload,
+          extinguishers: normalizeExtinguisherCollection(currentPumps.extintores).collection.items,
+        });
+      }
+      if (selectedIds.includes('hidrantes')) {
+        await syncHydrantInspection({
+          ...commonPayload,
+          hydrants: normalizeHydrantsData(currentPumps.hidrantes).collection.items,
+        });
+      }
 
       const syncedAt = Date.now();
       await updateSyncState(id, 'synced');
@@ -281,6 +317,7 @@ export default function InspectionIndexScreen() {
   const pumpSchemas = schemas.filter((schema) => pumpIds.has(schema.id));
   const otherSchemas = schemas.filter((schema) => !pumpIds.has(schema.id));
   const includesExtinguishers = selectedFormatIds.includes('extintores');
+  const includesHydrants = selectedFormatIds.includes('hidrantes');
   const progress = schemas.map((schema) => formatProgress(schema, pumpsData[schema.id] ?? {}));
   const allComplete = progress.length > 0 && progress.every((item) => item.complete);
   const anyStarted = progress.some((item) => item.hasAnyData);
@@ -308,6 +345,10 @@ export default function InspectionIndexScreen() {
         onPress={() => {
           if (schema.id === 'extintores') {
             router.push(`/inspection/${id}/extinguishers${locked ? '?readonly=1' : ''}`);
+            return;
+          }
+          if (schema.id === 'hidrantes') {
+            router.push(`/inspection/${id}/hydrants${locked ? '?readonly=1' : ''}`);
             return;
           }
           router.push(`/inspection/${id}/fill?pump=${schema.id}${locked ? '&readonly=1' : ''}`);
@@ -401,7 +442,7 @@ export default function InspectionIndexScreen() {
           </Text>
         </TouchableOpacity>
 
-        {locked && includesExtinguishers && (
+        {locked && (includesExtinguishers || includesHydrants) && (
           <View style={styles.syncBox}>
             <View style={styles.syncHeader}>
               <Text style={styles.syncTitle}>Servidor local</Text>

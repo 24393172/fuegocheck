@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { ExtinguisherInspectionPayload } from './validation.js';
+import { ExtinguisherInspectionPayload, HydrantInspectionPayload } from './validation.js';
 
 export class LocalDatabase {
   private readonly database: DatabaseSync;
@@ -16,6 +16,8 @@ export class LocalDatabase {
         id TEXT PRIMARY KEY,
         company_id TEXT,
         company_name TEXT NOT NULL,
+        branch_id TEXT,
+        branch_name TEXT,
         inspection_date TEXT NOT NULL,
         technician_id TEXT,
         technician_name TEXT NOT NULL,
@@ -56,6 +58,36 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_extinguishers_inspection
       ON extinguishers(inspection_id);
 
+      CREATE TABLE IF NOT EXISTS hydrants (
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        numero TEXT NOT NULL,
+        location_id TEXT,
+        location_name_snapshot TEXT NOT NULL,
+        custom_location INTEGER NOT NULL CHECK (custom_location IN (0, 1)),
+        gabinete TEXT NOT NULL,
+        gabinete_comentario TEXT NOT NULL,
+        senalamiento TEXT NOT NULL,
+        senalamiento_comentario TEXT NOT NULL,
+        calcomania TEXT NOT NULL,
+        calcomania_comentario TEXT NOT NULL,
+        valvula_angular TEXT NOT NULL,
+        valvula_angular_comentario TEXT NOT NULL,
+        manguera TEXT NOT NULL,
+        manguera_comentario TEXT NOT NULL,
+        chiflon TEXT NOT NULL,
+        chiflon_comentario TEXT NOT NULL,
+        llave_acople TEXT NOT NULL,
+        llave_acople_comentario TEXT NOT NULL,
+        observaciones TEXT NOT NULL,
+        created_at INTEGER,
+        updated_at INTEGER,
+        PRIMARY KEY (inspection_id, id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_hydrants_inspection
+      ON hydrants(inspection_id);
+
       CREATE TABLE IF NOT EXISTS generated_reports (
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
@@ -72,6 +104,28 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_generated_reports_generated_at
       ON generated_reports(generated_at DESC);
     `);
+    this.ensureColumn('inspections', 'branch_id', 'TEXT');
+    this.ensureColumn('inspections', 'branch_name', 'TEXT');
+    // From Fase 6 onward a report represents the whole inspection, not one
+    // format. Existing Extintores-only reports keep their id and file.
+    this.database.exec(`
+      DELETE FROM generated_reports
+      WHERE format_type = 'extinguishers'
+        AND EXISTS (
+          SELECT 1 FROM generated_reports newer
+          WHERE newer.inspection_id = generated_reports.inspection_id
+            AND newer.format_type = 'inspection'
+        );
+      UPDATE generated_reports SET format_type = 'inspection'
+      WHERE format_type = 'extinguishers';
+    `);
+  }
+
+  private ensureColumn(table: string, column: string, definition: string) {
+    const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((item) => item.name === column)) {
+      this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
   }
 
   upsertInspection(payload: ExtinguisherInspectionPayload) {
@@ -84,12 +138,14 @@ export class LocalDatabase {
     try {
       this.database.prepare(`
         INSERT INTO inspections (
-          id, company_id, company_name, inspection_date, technician_id,
+          id, company_id, company_name, branch_id, branch_name, inspection_date, technician_id,
           technician_name, received_at, updated_at, source_device_id, sync_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           company_id = excluded.company_id,
           company_name = excluded.company_name,
+          branch_id = excluded.branch_id,
+          branch_name = excluded.branch_name,
           inspection_date = excluded.inspection_date,
           technician_id = excluded.technician_id,
           technician_name = excluded.technician_name,
@@ -100,6 +156,8 @@ export class LocalDatabase {
         payload.inspectionId,
         payload.company.id ?? null,
         payload.company.name,
+        payload.branch?.id ?? null,
+        payload.branch?.name ?? null,
         payload.date,
         payload.technician.id ?? null,
         payload.technician.name,
@@ -161,6 +219,95 @@ export class LocalDatabase {
     }
   }
 
+  upsertHydrantInspection(payload: HydrantInspectionPayload) {
+    const now = new Date().toISOString();
+    const existing = this.database.prepare(
+      'SELECT received_at FROM inspections WHERE id = ?'
+    ).get(payload.inspectionId) as { received_at: string } | undefined;
+
+    this.database.exec('BEGIN IMMEDIATE;');
+    try {
+      this.database.prepare(`
+        INSERT INTO inspections (
+          id, company_id, company_name, branch_id, branch_name, inspection_date, technician_id,
+          technician_name, received_at, updated_at, source_device_id, sync_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          company_id = excluded.company_id,
+          company_name = excluded.company_name,
+          branch_id = excluded.branch_id,
+          branch_name = excluded.branch_name,
+          inspection_date = excluded.inspection_date,
+          technician_id = excluded.technician_id,
+          technician_name = excluded.technician_name,
+          updated_at = excluded.updated_at,
+          source_device_id = excluded.source_device_id,
+          sync_version = excluded.sync_version
+      `).run(
+        payload.inspectionId,
+        payload.company.id ?? null,
+        payload.company.name,
+        payload.branch?.id ?? null,
+        payload.branch?.name ?? null,
+        payload.date,
+        payload.technician.id ?? null,
+        payload.technician.name,
+        existing?.received_at ?? now,
+        now,
+        payload.sourceDeviceId ?? null,
+        payload.syncVersion
+      );
+
+      this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(payload.inspectionId);
+      const insert = this.database.prepare(`
+        INSERT INTO hydrants (
+          inspection_id, id, numero, location_id, location_name_snapshot, custom_location,
+          gabinete, gabinete_comentario, senalamiento, senalamiento_comentario,
+          calcomania, calcomania_comentario, valvula_angular, valvula_angular_comentario,
+          manguera, manguera_comentario, chiflon, chiflon_comentario,
+          llave_acople, llave_acople_comentario, observaciones, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const hydrant of payload.hydrants) {
+        insert.run(
+          payload.inspectionId,
+          hydrant.id,
+          hydrant.numero,
+          hydrant.locationId ?? null,
+          hydrant.locationNameSnapshot,
+          hydrant.customLocation ? 1 : 0,
+          hydrant.gabinete,
+          hydrant.gabinete_comentario,
+          hydrant.senalamiento,
+          hydrant.senalamiento_comentario,
+          hydrant.calcomania,
+          hydrant.calcomania_comentario,
+          hydrant.valvula_angular,
+          hydrant.valvula_angular_comentario,
+          hydrant.manguera,
+          hydrant.manguera_comentario,
+          hydrant.chiflon,
+          hydrant.chiflon_comentario,
+          hydrant.llave_acople,
+          hydrant.llave_acople_comentario,
+          hydrant.observaciones,
+          hydrant.createdAt ?? null,
+          hydrant.updatedAt ?? null
+        );
+      }
+      this.database.exec('COMMIT;');
+      return {
+        created: !existing,
+        inspectionId: payload.inspectionId,
+        hydrantsReceived: payload.hydrants.length,
+        syncedAt: now,
+      };
+    } catch (error) {
+      this.database.exec('ROLLBACK;');
+      throw error;
+    }
+  }
+
   inspectionCount(id: string): number {
     const row = this.database.prepare('SELECT COUNT(*) AS count FROM inspections WHERE id = ?')
       .get(id) as { count: number };
@@ -172,6 +319,47 @@ export class LocalDatabase {
       'SELECT COUNT(*) AS count FROM extinguishers WHERE inspection_id = ?'
     ).get(inspectionId) as { count: number };
     return row.count;
+  }
+
+  hydrantCount(inspectionId: string): number {
+    const row = this.database.prepare(
+      'SELECT COUNT(*) AS count FROM hydrants WHERE inspection_id = ?'
+    ).get(inspectionId) as { count: number };
+    return row.count;
+  }
+
+  getInspectionReportData(inspectionId: string): InspectionReportData | undefined {
+    const inspection = this.database.prepare(`
+      SELECT id, company_id AS companyId, company_name AS companyName,
+             branch_id AS branchId, branch_name AS branchName,
+             inspection_date AS inspectionDate, technician_id AS technicianId,
+             technician_name AS technicianName
+      FROM inspections WHERE id = ?
+    `).get(inspectionId) as InspectionReportData['inspection'] | undefined;
+    if (!inspection) return undefined;
+
+    const extinguishers = this.database.prepare(`
+      SELECT id, numero, ubicacion, tipo_extintor, capacidad, proxima_recarga,
+             presion, presion_comentario, altura, altura_comentario,
+             seguro, seguro_comentario, pintura, pintura_comentario,
+             manguera, manguera_comentario, difusor, difusor_comentario,
+             senalamiento, senalamiento_comentario, observaciones,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM extinguishers WHERE inspection_id = ? ORDER BY rowid
+    `).all(inspectionId) as unknown as InspectionReportData['extinguishers'];
+    const rawHydrants = this.database.prepare(`
+      SELECT id, numero, location_id AS locationId,
+             location_name_snapshot AS locationNameSnapshot,
+             custom_location AS customLocation,
+             gabinete, gabinete_comentario, senalamiento, senalamiento_comentario,
+             calcomania, calcomania_comentario, valvula_angular, valvula_angular_comentario,
+             manguera, manguera_comentario, chiflon, chiflon_comentario,
+             llave_acople, llave_acople_comentario, observaciones,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM hydrants WHERE inspection_id = ? ORDER BY rowid
+    `).all(inspectionId) as Array<Omit<HydrantInspectionPayload['hydrants'][number], 'customLocation'> & { customLocation: number }>;
+    const hydrants = rawHydrants.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
+    return { inspection, extinguishers, hydrants };
   }
 
   saveGeneratedReport(input: {
@@ -216,7 +404,17 @@ export class LocalDatabase {
     return this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
              r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date
+             i.company_name, i.inspection_date,
+             CASE
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Extintores, Hidrantes'
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                 THEN 'Extintores'
+               WHEN EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Hidrantes'
+               ELSE ''
+             END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.id = ?
     `).get(id) as GeneratedReport | undefined;
   }
@@ -225,7 +423,17 @@ export class LocalDatabase {
     return this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
              r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date
+             i.company_name, i.inspection_date,
+             CASE
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Extintores, Hidrantes'
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                 THEN 'Extintores'
+               WHEN EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Hidrantes'
+               ELSE ''
+             END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
       WHERE r.inspection_id = ? AND r.format_type = ?
     `).get(inspectionId, formatType) as GeneratedReport | undefined;
@@ -235,7 +443,17 @@ export class LocalDatabase {
     return this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
              r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date
+             i.company_name, i.inspection_date,
+             CASE
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Extintores, Hidrantes'
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                 THEN 'Extintores'
+               WHEN EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Hidrantes'
+               ELSE ''
+             END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.filename = ?
     `).get(filename) as GeneratedReport | undefined;
   }
@@ -244,7 +462,17 @@ export class LocalDatabase {
     return this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
              r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date
+             i.company_name, i.inspection_date,
+             CASE
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Extintores, Hidrantes'
+               WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
+                 THEN 'Extintores'
+               WHEN EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
+                 THEN 'Hidrantes'
+               ELSE ''
+             END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
       ORDER BY r.generated_at DESC
     `).all() as unknown as GeneratedReport[];
@@ -261,6 +489,7 @@ export class LocalDatabase {
     return {
       inspections: this.database.prepare('SELECT COUNT(*) AS count FROM inspections').get(),
       extinguishers: this.database.prepare('SELECT COUNT(*) AS count FROM extinguishers').get(),
+      hydrants: this.database.prepare('SELECT COUNT(*) AS count FROM hydrants').get(),
       recent: this.database.prepare(`
         SELECT id, company_name, inspection_date, updated_at, sync_version
         FROM inspections ORDER BY updated_at DESC LIMIT 20
@@ -290,4 +519,20 @@ export interface GeneratedReport {
   template_version: string;
   company_name: string;
   inspection_date: string;
+  formats: string;
+}
+
+export interface InspectionReportData {
+  inspection: {
+    id: string;
+    companyId: string | null;
+    companyName: string;
+    branchId: string | null;
+    branchName: string | null;
+    inspectionDate: string;
+    technicianId: string | null;
+    technicianName: string;
+  };
+  extinguishers: ExtinguisherInspectionPayload['extinguishers'];
+  hydrants: HydrantInspectionPayload['hydrants'];
 }

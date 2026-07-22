@@ -7,7 +7,7 @@ import { AdminRepository } from './admin-repository.js';
 import { createAdminRouter } from './admin-router.js';
 import { LocalDatabase } from './database.js';
 import { ExtinguisherReportService } from './report-generator.js';
-import { extinguisherInspectionSchema } from './validation.js';
+import { extinguisherInspectionSchema, hydrantInspectionSchema } from './validation.js';
 
 export function createApp(
   database: LocalDatabase,
@@ -49,7 +49,7 @@ export function createApp(
       const payload = extinguisherInspectionSchema.parse(request.body);
       const result = database.upsertInspection(payload);
       try {
-        const report = await reportService.generate(payload);
+        const report = await reportService.generate(payload.inspectionId);
         response.status(result.created ? 201 : 200).json({
           ok: true,
           ...result,
@@ -66,7 +66,7 @@ export function createApp(
           ok: false,
           inspectionSaved: true,
           inspectionId: payload.inspectionId,
-          message: 'Inspection saved, but the extinguisher report could not be generated',
+          message: 'Inspection saved, but the inspection report could not be generated',
         });
       }
     } catch (error) {
@@ -74,6 +74,44 @@ export function createApp(
         response.status(400).json({
           ok: false,
           message: 'Invalid extinguisher inspection payload',
+          issues: error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
+        });
+        return;
+      }
+      next(error);
+    }
+  });
+
+  app.post('/api/inspections/hydrants', async (request, response, next) => {
+    try {
+      const payload = hydrantInspectionSchema.parse(request.body);
+      const result = database.upsertHydrantInspection(payload);
+      try {
+        const report = await reportService.generate(payload.inspectionId);
+        response.status(result.created ? 201 : 200).json({
+          ok: true,
+          ...result,
+          report: {
+            id: report.id,
+            filename: report.filename,
+            downloadUrl: `/api/reports/${report.id}/download`,
+            generatedAt: report.generated_at,
+          },
+        });
+      } catch (generationError) {
+        console.error('[server] Inspection saved, but report generation failed:', generationError);
+        response.status(500).json({
+          ok: false,
+          inspectionSaved: true,
+          inspectionId: payload.inspectionId,
+          message: 'Inspection saved, but the inspection report could not be generated',
+        });
+      }
+    } catch (error) {
+      if (error instanceof ZodError) {
+        response.status(400).json({
+          ok: false,
+          message: 'Invalid hydrant inspection payload',
           issues: error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message })),
         });
         return;
@@ -96,6 +134,7 @@ export function createApp(
         templateVersion: report.template_version,
         companyName: report.company_name,
         inspectionDate: report.inspection_date,
+        formats: report.formats,
         downloadUrl: report.status === 'generated' ? `/api/reports/${report.id}/download` : null,
       })),
     });

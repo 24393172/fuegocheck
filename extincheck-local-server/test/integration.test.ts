@@ -57,6 +57,45 @@ function payload(inspectionId = 'inspection-pilot-001') {
   };
 }
 
+function hydrant(id: string, numero: string) {
+  return {
+    id,
+    numero,
+    locationId: numero === '3' ? null : `location-hydrant-${numero}`,
+    locationNameSnapshot: `Ubicación hidrante ${numero}`,
+    customLocation: numero === '3',
+    gabinete: 'si' as const,
+    gabinete_comentario: '',
+    senalamiento: 'no' as const,
+    senalamiento_comentario: numero === '1' ? 'Señal deteriorada' : '',
+    calcomania: 'na' as const,
+    calcomania_comentario: '',
+    valvula_angular: 'si' as const,
+    valvula_angular_comentario: '',
+    manguera: 'si' as const,
+    manguera_comentario: '',
+    chiflon: 'si' as const,
+    chiflon_comentario: '',
+    llave_acople: 'si' as const,
+    llave_acople_comentario: '',
+    observaciones: numero === '1' ? 'Requiere señal nueva.' : '',
+    createdAt: 3,
+    updatedAt: 4,
+  };
+}
+
+function hydrantPayload(inspectionId = 'inspection-hydrants-001', count = 3) {
+  return {
+    inspectionId,
+    company: { id: 'company-1', name: 'Hotel Piloto' },
+    branch: { id: 'branch-1', name: 'Torre principal' },
+    date: '2026-07-21',
+    technician: { id: null, name: 'Daniel Cocom' },
+    hydrants: Array.from({ length: count }, (_, index) => hydrant(`hyd-${index + 1}`, String(index + 1))),
+    syncVersion: 200,
+  };
+}
+
 async function testServer(context: Parameters<typeof test>[1] extends (context: infer C) => unknown ? C : never) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-server-'));
   const databasePath = path.join(directory, 'test.sqlite');
@@ -174,6 +213,116 @@ test('invalid duplicate extinguisher ids return 400 without saving data', async 
   assert.equal(response.status, 400);
   assert.equal(database.inspectionCount('invalid'), 0);
   assert.equal(database.reportCount('invalid'), 0);
+});
+
+test('three hydrants persist, generate the HIDRANTES sheet and remain idempotent', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const templateHashBefore = fileHash(templatePath);
+  const inspection = hydrantPayload();
+
+  const first = await fetch(`${baseUrl}/api/inspections/hydrants`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json() as { report: { id: string; filename: string } };
+  assert.match(firstBody.report.filename, /^Reporte_Hidrantes_Hotel_Piloto_2026-07-21_inspection-h\.xlsx$/);
+
+  const repeated = await fetch(`${baseUrl}/api/inspections/hydrants`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(repeated.status, 200);
+  const repeatedBody = await repeated.json() as { report: { id: string } };
+  assert.equal(repeatedBody.report.id, firstBody.report.id);
+  assert.equal(database.inspectionCount(inspection.inspectionId), 1);
+  assert.equal(database.hydrantCount(inspection.inspectionId), 3);
+  assert.equal(database.reportCount(inspection.inspectionId), 1);
+  assert.equal(fileHash(templatePath), templateHashBefore);
+
+  const report = database.getReport(firstBody.report.id);
+  assert.ok(report);
+  const templateBook = new ExcelJS.Workbook();
+  const reportBook = new ExcelJS.Workbook();
+  await templateBook.xlsx.readFile(templatePath);
+  await reportBook.xlsx.readFile(report.file_path);
+  const templateSheet = templateBook.getWorksheet('HIDRANTES');
+  const reportSheet = reportBook.getWorksheet('HIDRANTES');
+  assert.ok(templateSheet && reportSheet);
+  assert.equal(reportSheet.getCell('F8').value, 'Hotel Piloto');
+  assert.equal(reportSheet.getCell('F9').value, 'RED DE HIDRANTES');
+  assert.equal(reportSheet.getCell('F10').value, '2026-07-21');
+  assert.equal(reportSheet.getCell('A13').value, '1');
+  assert.equal(reportSheet.getCell('C13').value, 'Ubicación hidrante 1');
+  assert.equal(reportSheet.getCell('L13').value, 'Sí');
+  assert.equal(reportSheet.getCell('O13').value, 'No');
+  assert.equal(reportSheet.getCell('Q13').value, 'N/A');
+  assert.equal(reportSheet.getCell('AD13').value, 'Requiere señal nueva.\nSeñalamiento: Señal deteriorada');
+  for (let row = 16; row <= 50; row += 1) {
+    for (let column = 1; column <= 35; column += 1) {
+      assert.equal(reportSheet.getCell(row, column).value, null, `Expected empty hydrant cell at ${row}, ${column}`);
+    }
+  }
+  assert.deepEqual([...reportSheet.model.merges].sort(), [...templateSheet.model.merges].sort());
+  assert.equal(reportSheet.getImages().length, templateSheet.getImages().length);
+  assert.equal(reportSheet.getColumn(3).width, templateSheet.getColumn(3).width);
+  assert.deepEqual(reportSheet.getCell('A13').border, templateSheet.getCell('A13').border);
+});
+
+test('two extinguishers plus two hydrants produce one general workbook', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-mixed-001';
+  const extinguisherInspection = payload(inspectionId);
+  extinguisherInspection.extinguishers = extinguisherInspection.extinguishers.slice(0, 2);
+  const extinguisherResponse = await fetch(`${baseUrl}/api/inspections/extinguishers`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(extinguisherInspection),
+  });
+  assert.equal(extinguisherResponse.status, 201);
+  const extinguisherBody = await extinguisherResponse.json() as { report: { id: string } };
+
+  const hydrantInspection = hydrantPayload(inspectionId, 2);
+  hydrantInspection.company = extinguisherInspection.company as { id: string; name: string };
+  hydrantInspection.date = extinguisherInspection.date;
+  const hydrantResponse = await fetch(`${baseUrl}/api/inspections/hydrants`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(hydrantInspection),
+  });
+  assert.equal(hydrantResponse.status, 200);
+  const hydrantBody = await hydrantResponse.json() as { report: { id: string; filename: string } };
+  assert.equal(hydrantBody.report.id, extinguisherBody.report.id);
+  assert.match(hydrantBody.report.filename, /^Reporte_Inspeccion_/);
+  assert.equal(database.extinguisherCount(inspectionId), 2);
+  assert.equal(database.hydrantCount(inspectionId), 2);
+  assert.equal(database.reportCount(inspectionId), 1);
+
+  const report = database.getReport(hydrantBody.report.id);
+  assert.ok(report);
+  assert.equal(report.formats, 'Extintores, Hidrantes');
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.readFile(report.file_path);
+  assert.equal(book.getWorksheet('EXTINTORES')?.getCell('A14').value, '1');
+  assert.equal(book.getWorksheet('EXTINTORES')?.getCell('A15').value, '2');
+  assert.equal(book.getWorksheet('HIDRANTES')?.getCell('A13').value, '1');
+  assert.equal(book.getWorksheet('HIDRANTES')?.getCell('A14').value, '2');
+
+  const list = await (await fetch(`${baseUrl}/api/reports`)).json() as { reports: Array<{ formats: string }> };
+  assert.equal(list.reports.length, 1);
+  assert.equal(list.reports[0].formats, 'Extintores, Hidrantes');
+});
+
+test('duplicate hydrant ids and more than 38 records are rejected', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const duplicate = hydrantPayload('invalid-hydrants-duplicate');
+  duplicate.hydrants[1].id = duplicate.hydrants[0].id;
+  const duplicateResponse = await fetch(`${baseUrl}/api/inspections/hydrants`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(duplicate),
+  });
+  assert.equal(duplicateResponse.status, 400);
+  assert.equal(database.inspectionCount(duplicate.inspectionId), 0);
+
+  const tooMany = hydrantPayload('invalid-hydrants-limit', 39);
+  const limitResponse = await fetch(`${baseUrl}/api/inspections/hydrants`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tooMany),
+  });
+  assert.equal(limitResponse.status, 400);
+  assert.equal(database.inspectionCount(tooMany.inspectionId), 0);
 });
 
 test('admin catalog persists companies, branches and filtered equipment locations', async (context) => {
