@@ -37,7 +37,8 @@ export async function initializeDatabase(): Promise<void> {
       sync_status TEXT NOT NULL DEFAULT 'pending',
       last_sync_attempt INTEGER,
       synced_at INTEGER,
-      sync_error TEXT
+      sync_error TEXT,
+      synced_format_ids TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS photos (
@@ -159,6 +160,9 @@ export async function initializeDatabase(): Promise<void> {
   if (!inspectionColumns.some((column) => column.name === 'sync_error')) {
     await database.execAsync('ALTER TABLE inspections ADD COLUMN sync_error TEXT;');
   }
+  if (!inspectionColumns.some((column) => column.name === 'synced_format_ids')) {
+    await database.execAsync("ALTER TABLE inspections ADD COLUMN synced_format_ids TEXT NOT NULL DEFAULT '[]';");
+  }
   await database.execAsync(`
     CREATE INDEX IF NOT EXISTS idx_inspections_pinned_updated
     ON inspections(pinned DESC, updated_at DESC);
@@ -189,5 +193,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 4;');
+  await database.execAsync('PRAGMA user_version = 5;');
 }

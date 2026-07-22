@@ -7,7 +7,7 @@ import { deleteAttachmentFilesForInspection } from '../attachment-files';
 type CreateInspectionInput = Omit<
   Inspection,
   'id' | 'pinned' | 'created_at' | 'updated_at' | 'sent_at' |
-  'sync_status' | 'last_sync_attempt' | 'synced_at' | 'sync_error'
+  'sync_status' | 'last_sync_attempt' | 'synced_at' | 'sync_error' | 'synced_format_ids'
 >;
 
 type InspectionRow = Omit<Inspection, 'pinned'> & { pinned: number };
@@ -44,12 +44,13 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
     last_sync_attempt: null,
     synced_at: null,
     sync_error: null,
+    synced_format_ids: '[]',
   };
 
   await db.runAsync(
     `INSERT INTO inspections
-      (id, form_type, form_version, technician_name, client_name, location, status, pending_comment, form_data, created_at, updated_at, sent_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, form_type, form_version, technician_name, client_name, location, status, pending_comment, form_data, created_at, updated_at, sent_at, synced_format_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       inspection.id,
       inspection.form_type,
@@ -63,6 +64,7 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
       inspection.created_at,
       inspection.updated_at,
       inspection.sent_at,
+      inspection.synced_format_ids,
     ]
   );
 
@@ -136,6 +138,7 @@ export async function updateInspection(
     updates.sync_status = 'pending';
     updates.synced_at = null;
     updates.sync_error = null;
+    updates.synced_format_ids = '[]';
   }
   const columns = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
   const values = [...Object.values(updates), id];
@@ -162,7 +165,8 @@ export async function updateStatus(id: string, status: InspectionStatus, pending
 export async function updateSyncState(
   id: string,
   status: SyncStatus,
-  errorMessage: string | null = null
+  errorMessage: string | null = null,
+  syncedFormatIds?: string[]
 ): Promise<void> {
   const db = getDatabase();
   const now = Date.now();
@@ -171,9 +175,12 @@ export async function updateSyncState(
      SET sync_status = ?,
          last_sync_attempt = ?,
          synced_at = CASE WHEN ? = 'synced' THEN ? ELSE synced_at END,
-         sync_error = ?
+         sync_error = ?,
+         synced_format_ids = COALESCE(?, synced_format_ids)
      WHERE id = ?`,
-    [status, now, status, now, status === 'error' ? errorMessage?.slice(0, 1000) ?? 'Unknown sync error' : null, id]
+    [status, now, status, now,
+      status === 'error' || status === 'partial' ? errorMessage?.slice(0, 1000) ?? null : null,
+      syncedFormatIds ? JSON.stringify(syncedFormatIds) : null, id]
   );
 }
 

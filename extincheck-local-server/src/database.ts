@@ -24,7 +24,8 @@ export class LocalDatabase {
         received_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         source_device_id TEXT,
-        sync_version INTEGER NOT NULL
+        sync_version INTEGER NOT NULL,
+        selected_format_ids TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE TABLE IF NOT EXISTS extinguishers (
@@ -98,6 +99,9 @@ export class LocalDatabase {
         status TEXT NOT NULL CHECK (status IN ('generated', 'error')),
         error_message TEXT,
         template_version TEXT NOT NULL,
+        last_attempt_at TEXT,
+        last_attempt_status TEXT,
+        last_attempt_error TEXT,
         UNIQUE (inspection_id, format_type)
       );
 
@@ -106,6 +110,19 @@ export class LocalDatabase {
     `);
     this.ensureColumn('inspections', 'branch_id', 'TEXT');
     this.ensureColumn('inspections', 'branch_name', 'TEXT');
+    this.ensureColumn('inspections', 'selected_format_ids', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('generated_reports', 'last_attempt_at', 'TEXT');
+    this.ensureColumn('generated_reports', 'last_attempt_status', 'TEXT');
+    this.ensureColumn('generated_reports', 'last_attempt_error', 'TEXT');
+    this.database.exec(`
+      UPDATE inspections SET selected_format_ids = json_array(
+        CASE WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = inspections.id) THEN 'extintores' END,
+        CASE WHEN EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = inspections.id) THEN 'hidrantes' END
+      ) WHERE selected_format_ids = '[]';
+      UPDATE inspections SET selected_format_ids = replace(replace(selected_format_ids, ',null', ''), 'null,', '')
+      WHERE selected_format_ids LIKE '%null%';
+      UPDATE inspections SET selected_format_ids = '[]' WHERE selected_format_ids = '[null]';
+    `);
     // From Fase 6 onward a report represents the whole inspection, not one
     // format. Existing Extintores-only reports keep their id and file.
     this.database.exec(`
@@ -128,13 +145,55 @@ export class LocalDatabase {
     }
   }
 
-  upsertInspection(payload: ExtinguisherInspectionPayload) {
+  beginSync() { this.database.exec('BEGIN IMMEDIATE;'); }
+  commitSync() { this.database.exec('COMMIT;'); }
+  rollbackSync() { this.database.exec('ROLLBACK;'); }
+  setSelectedFormatIds(inspectionId: string, ids: string[]) {
+    this.database.prepare('UPDATE inspections SET selected_format_ids = ? WHERE id = ?')
+      .run(JSON.stringify(ids), inspectionId);
+  }
+  addSelectedFormatId(inspectionId: string, formatId: string) {
+    const row = this.database.prepare('SELECT selected_format_ids AS ids FROM inspections WHERE id = ?')
+      .get(inspectionId) as { ids: string } | undefined;
+    const ids = row ? JSON.parse(row.ids || '[]') as string[] : [];
+    this.setSelectedFormatIds(inspectionId, [...new Set([...ids, formatId])]);
+  }
+  clearUnselectedSupportedFormats(inspectionId: string, selectedIds: string[]) {
+    if (!selectedIds.includes('extintores')) {
+      this.database.prepare('DELETE FROM extinguishers WHERE inspection_id = ?').run(inspectionId);
+    }
+    if (!selectedIds.includes('hidrantes')) {
+      this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(inspectionId);
+    }
+  }
+  upsertInspectionMetadata(payload: Omit<ExtinguisherInspectionPayload, 'extinguishers'>): boolean {
+    const now = new Date().toISOString();
+    const existing = this.database.prepare('SELECT received_at FROM inspections WHERE id = ?')
+      .get(payload.inspectionId) as { received_at: string } | undefined;
+    this.database.prepare(`
+      INSERT INTO inspections (
+        id, company_id, company_name, branch_id, branch_name, inspection_date, technician_id,
+        technician_name, received_at, updated_at, source_device_id, sync_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET company_id=excluded.company_id, company_name=excluded.company_name,
+        branch_id=excluded.branch_id, branch_name=excluded.branch_name,
+        inspection_date=excluded.inspection_date, technician_id=excluded.technician_id,
+        technician_name=excluded.technician_name, updated_at=excluded.updated_at,
+        source_device_id=excluded.source_device_id, sync_version=excluded.sync_version
+    `).run(payload.inspectionId, payload.company.id ?? null, payload.company.name,
+      payload.branch?.id ?? null, payload.branch?.name ?? null, payload.date,
+      payload.technician.id ?? null, payload.technician.name, existing?.received_at ?? now,
+      now, payload.sourceDeviceId ?? null, payload.syncVersion);
+    return !existing;
+  }
+
+  upsertInspection(payload: ExtinguisherInspectionPayload, manageTransaction = true) {
     const now = new Date().toISOString();
     const existing = this.database.prepare(
       'SELECT received_at FROM inspections WHERE id = ?'
     ).get(payload.inspectionId) as { received_at: string } | undefined;
 
-    this.database.exec('BEGIN IMMEDIATE;');
+    if (manageTransaction) this.database.exec('BEGIN IMMEDIATE;');
     try {
       this.database.prepare(`
         INSERT INTO inspections (
@@ -206,7 +265,7 @@ export class LocalDatabase {
           extinguisher.updatedAt ?? null
         );
       }
-      this.database.exec('COMMIT;');
+      if (manageTransaction) this.database.exec('COMMIT;');
       return {
         created: !existing,
         inspectionId: payload.inspectionId,
@@ -214,18 +273,18 @@ export class LocalDatabase {
         syncedAt: now,
       };
     } catch (error) {
-      this.database.exec('ROLLBACK;');
+      if (manageTransaction) this.database.exec('ROLLBACK;');
       throw error;
     }
   }
 
-  upsertHydrantInspection(payload: HydrantInspectionPayload) {
+  upsertHydrantInspection(payload: HydrantInspectionPayload, manageTransaction = true) {
     const now = new Date().toISOString();
     const existing = this.database.prepare(
       'SELECT received_at FROM inspections WHERE id = ?'
     ).get(payload.inspectionId) as { received_at: string } | undefined;
 
-    this.database.exec('BEGIN IMMEDIATE;');
+    if (manageTransaction) this.database.exec('BEGIN IMMEDIATE;');
     try {
       this.database.prepare(`
         INSERT INTO inspections (
@@ -295,7 +354,7 @@ export class LocalDatabase {
           hydrant.updatedAt ?? null
         );
       }
-      this.database.exec('COMMIT;');
+      if (manageTransaction) this.database.exec('COMMIT;');
       return {
         created: !existing,
         inspectionId: payload.inspectionId,
@@ -303,7 +362,7 @@ export class LocalDatabase {
         syncedAt: now,
       };
     } catch (error) {
-      this.database.exec('ROLLBACK;');
+      if (manageTransaction) this.database.exec('ROLLBACK;');
       throw error;
     }
   }
@@ -333,7 +392,7 @@ export class LocalDatabase {
       SELECT id, company_id AS companyId, company_name AS companyName,
              branch_id AS branchId, branch_name AS branchName,
              inspection_date AS inspectionDate, technician_id AS technicianId,
-             technician_name AS technicianName
+             technician_name AS technicianName, selected_format_ids AS selectedFormatIdsJson
       FROM inspections WHERE id = ?
     `).get(inspectionId) as InspectionReportData['inspection'] | undefined;
     if (!inspection) return undefined;
@@ -359,6 +418,7 @@ export class LocalDatabase {
       FROM hydrants WHERE inspection_id = ? ORDER BY rowid
     `).all(inspectionId) as Array<Omit<HydrantInspectionPayload['hydrants'][number], 'customLocation'> & { customLocation: number }>;
     const hydrants = rawHydrants.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
+    inspection.selectedFormatIds = JSON.parse(inspection.selectedFormatIdsJson || '[]') as string[];
     return { inspection, extinguishers, hydrants };
   }
 
@@ -377,15 +437,18 @@ export class LocalDatabase {
     this.database.prepare(`
       INSERT INTO generated_reports (
         id, inspection_id, format_type, filename, file_path, generated_at,
-        status, error_message, template_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, error_message, template_version, last_attempt_at, last_attempt_status, last_attempt_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(inspection_id, format_type) DO UPDATE SET
         filename = excluded.filename,
         file_path = excluded.file_path,
         generated_at = excluded.generated_at,
         status = excluded.status,
         error_message = excluded.error_message,
-        template_version = excluded.template_version
+        template_version = excluded.template_version,
+        last_attempt_at = excluded.last_attempt_at,
+        last_attempt_status = excluded.last_attempt_status,
+        last_attempt_error = excluded.last_attempt_error
     `).run(
       id,
       input.inspectionId,
@@ -396,15 +459,45 @@ export class LocalDatabase {
       input.status,
       input.errorMessage,
       input.templateVersion
+      , input.generatedAt, input.status, input.errorMessage
     );
     return this.getReport(id)!;
   }
 
+  saveReportAttemptFailure(inspectionId: string, formatType: string, message: string, attemptedAt: string) {
+    const existing = this.getReportForInspection(inspectionId, formatType);
+    if (existing?.status === 'generated') {
+      this.database.prepare(`UPDATE generated_reports
+        SET last_attempt_at = ?, last_attempt_status = 'error', last_attempt_error = ?
+        WHERE id = ?`).run(attemptedAt, message, existing.id);
+      return;
+    }
+    this.saveGeneratedReport({
+      inspectionId, formatType, filename: existing?.filename ?? '', filePath: existing?.file_path ?? '',
+      generatedAt: attemptedAt, status: 'error', errorMessage: message,
+      templateVersion: existing?.template_version ?? 'unknown',
+    });
+  }
+
+  private decorateReport(report: GeneratedReport): GeneratedReport {
+    const labels: Record<string, string> = {
+      jockey: 'Bomba Jockey', diesel: 'Bomba Diésel', electrica: 'Bomba Eléctrica',
+      tablero_ad: 'Tablero A&D', dispositivos_ad: 'Dispositivos A&D',
+      dispositivos_convencionales: 'Dispositivos convencionales',
+      dispositivos_notificacion: 'Dispositivos de notificación', hidrantes: 'Hidrantes',
+      extintores: 'Extintores', ansul_r102: 'Ansul R-102',
+    };
+    let ids: string[] = [];
+    try { ids = JSON.parse(report.selected_format_ids || '[]') as string[]; } catch { /* legacy row */ }
+    return { ...report, formats: ids.map((id) => labels[id] ?? id).join(', ') || report.formats };
+  }
+
   getReport(id: string): GeneratedReport | undefined {
-    return this.database.prepare(`
+    const report = this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
-             r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date,
+             r.status, r.error_message, r.template_version, r.last_attempt_at,
+             r.last_attempt_status, r.last_attempt_error,
+             i.company_name, i.inspection_date, i.selected_format_ids,
              CASE
                WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
                 AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
@@ -417,13 +510,15 @@ export class LocalDatabase {
              END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.id = ?
     `).get(id) as GeneratedReport | undefined;
+    return report ? this.decorateReport(report) : undefined;
   }
 
   getReportForInspection(inspectionId: string, formatType: string): GeneratedReport | undefined {
-    return this.database.prepare(`
+    const report = this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
-             r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date,
+             r.status, r.error_message, r.template_version, r.last_attempt_at,
+             r.last_attempt_status, r.last_attempt_error,
+             i.company_name, i.inspection_date, i.selected_format_ids,
              CASE
                WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
                 AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
@@ -437,13 +532,15 @@ export class LocalDatabase {
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
       WHERE r.inspection_id = ? AND r.format_type = ?
     `).get(inspectionId, formatType) as GeneratedReport | undefined;
+    return report ? this.decorateReport(report) : undefined;
   }
 
   getReportByFilename(filename: string): GeneratedReport | undefined {
-    return this.database.prepare(`
+    const report = this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
-             r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date,
+             r.status, r.error_message, r.template_version, r.last_attempt_at,
+             r.last_attempt_status, r.last_attempt_error,
+             i.company_name, i.inspection_date, i.selected_format_ids,
              CASE
                WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
                 AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
@@ -456,13 +553,15 @@ export class LocalDatabase {
              END AS formats
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id WHERE r.filename = ?
     `).get(filename) as GeneratedReport | undefined;
+    return report ? this.decorateReport(report) : undefined;
   }
 
   listReports(): GeneratedReport[] {
-    return this.database.prepare(`
+    const reports = this.database.prepare(`
       SELECT r.id, r.inspection_id, r.format_type, r.filename, r.file_path, r.generated_at,
-             r.status, r.error_message, r.template_version,
-             i.company_name, i.inspection_date,
+             r.status, r.error_message, r.template_version, r.last_attempt_at,
+             r.last_attempt_status, r.last_attempt_error,
+             i.company_name, i.inspection_date, i.selected_format_ids,
              CASE
                WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = r.inspection_id)
                 AND EXISTS (SELECT 1 FROM hydrants h WHERE h.inspection_id = r.inspection_id)
@@ -476,6 +575,7 @@ export class LocalDatabase {
       FROM generated_reports r JOIN inspections i ON i.id = r.inspection_id
       ORDER BY r.generated_at DESC
     `).all() as unknown as GeneratedReport[];
+    return reports.map((report) => this.decorateReport(report));
   }
 
   reportCount(inspectionId: string): number {
@@ -520,6 +620,10 @@ export interface GeneratedReport {
   company_name: string;
   inspection_date: string;
   formats: string;
+  selected_format_ids: string;
+  last_attempt_at: string | null;
+  last_attempt_status: 'generated' | 'error' | null;
+  last_attempt_error: string | null;
 }
 
 export interface InspectionReportData {
@@ -532,6 +636,8 @@ export interface InspectionReportData {
     inspectionDate: string;
     technicianId: string | null;
     technicianName: string;
+    selectedFormatIdsJson: string;
+    selectedFormatIds: string[];
   };
   extinguishers: ExtinguisherInspectionPayload['extinguishers'];
   hydrants: HydrantInspectionPayload['hydrants'];

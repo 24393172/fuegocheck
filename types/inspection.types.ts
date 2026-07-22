@@ -1,5 +1,5 @@
 export type InspectionStatus = 'draft' | 'pending' | 'completed' | 'sent';
-export type SyncStatus = 'pending' | 'syncing' | 'synced' | 'error';
+export type SyncStatus = 'pending' | 'syncing' | 'partial' | 'synced' | 'error';
 
 // A site inspection (form_type 'site_v1') stores shared site data once and a
 // collection of formats. Answers are isolated by schema id inside `pumps`; the
@@ -46,6 +46,7 @@ export interface Inspection {
   last_sync_attempt: number | null;
   synced_at: number | null;
   sync_error: string | null;
+  synced_format_ids: string;
 }
 
 // Lightweight row for list screens (dashboard, history). Excludes the heavy

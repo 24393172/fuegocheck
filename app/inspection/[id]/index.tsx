@@ -27,12 +27,12 @@ import { getSignaturesByInspection } from '../../../lib/repositories/signatures.
 import { PUMP_SCHEMAS } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
 import { Inspection, Signature } from '../../../types/inspection.types';
+import { resolveSyncOutcome } from '../../../lib/sync-status';
 import {
   checkServerHealth,
   inspectionDateToIso,
   LocalServerApiError,
-  syncExtinguisherInspection,
-  syncHydrantInspection,
+  syncInspection,
 } from '../../../services/local-server-api';
 
 function formatProgress(schema: FormSchema, data: Record<string, unknown>) {
@@ -250,27 +250,26 @@ export default function InspectionIndexScreen() {
         technician: { id: null, name: siteData.tecnico || currentInspection.technician_name },
         syncVersion: currentInspection.updated_at,
       };
-      if (selectedIds.includes('extintores')) {
-        await syncExtinguisherInspection({
-          ...commonPayload,
-          extinguishers: normalizeExtinguisherCollection(currentPumps.extintores).collection.items,
-        });
-      }
-      if (selectedIds.includes('hidrantes')) {
-        await syncHydrantInspection({
-          ...commonPayload,
-          hydrants: normalizeHydrantsData(currentPumps.hidrantes).collection.items,
-        });
-      }
+      const response = await syncInspection({
+        ...commonPayload,
+        selectedFormatIds: selectedIds,
+        extinguishers: selectedIds.includes('extintores')
+          ? normalizeExtinguisherCollection(currentPumps.extintores).collection.items : undefined,
+        hydrants: selectedIds.includes('hidrantes')
+          ? normalizeHydrantsData(currentPumps.hidrantes).collection.items : undefined,
+      });
 
       const syncedAt = Date.now();
-      await updateSyncState(id, 'synced');
+      const syncedFormatIds = response.syncedFormatIds ?? [];
+      const outcome = resolveSyncOutcome(selectedIds, syncedFormatIds);
+      await updateSyncState(id, outcome.status, outcome.message, syncedFormatIds);
       setInspection((current) => current ? {
         ...current,
-        sync_status: 'synced',
-        synced_at: syncedAt,
+        sync_status: outcome.status,
+        synced_at: outcome.status === 'synced' ? syncedAt : current.synced_at,
         last_sync_attempt: syncedAt,
-        sync_error: null,
+        sync_error: outcome.message,
+        synced_format_ids: JSON.stringify(syncedFormatIds),
       } : current);
       Alert.alert('Sincronización completa', 'Inspección sincronizada correctamente con el servidor local.');
     } catch (error) {
@@ -442,17 +441,20 @@ export default function InspectionIndexScreen() {
           </Text>
         </TouchableOpacity>
 
-        {locked && (includesExtinguishers || includesHydrants) && (
+        {locked && (
           <View style={styles.syncBox}>
             <View style={styles.syncHeader}>
               <Text style={styles.syncTitle}>Servidor local</Text>
               <Text style={[
                 styles.syncStatus,
                 inspection.sync_status === 'synced' && styles.syncStatusSuccess,
+                inspection.sync_status === 'partial' && styles.syncStatusError,
                 inspection.sync_status === 'error' && styles.syncStatusError,
               ]}>
                 {inspection.sync_status === 'synced'
                   ? 'Sincronizada'
+                  : inspection.sync_status === 'partial'
+                    ? 'Parcial'
                   : inspection.sync_status === 'syncing'
                     ? 'Sincronizando'
                     : inspection.sync_status === 'error'

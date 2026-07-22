@@ -86,6 +86,10 @@ export default function FillScreen() {
         router.replace(`/inspection/${id}/extinguishers${readonly === '1' ? '?readonly=1' : ''}`);
         return;
       }
+      if (pump === 'hidrantes') {
+        router.replace(`/inspection/${id}/hydrants${readonly === '1' ? '?readonly=1' : ''}`);
+        return;
+      }
       try {
         const s = INSPECTION_SCHEMAS.find((x) => x.id === pump) ?? null;
         if (!s) {

@@ -9,7 +9,7 @@ import ExcelJS from 'exceljs';
 import { AdminRepository } from '../src/admin-repository.js';
 import { createApp } from '../src/app.js';
 import { LocalDatabase } from '../src/database.js';
-import { ExtinguisherReportService } from '../src/report-generator.js';
+import { ExtinguisherReportService, SHEET_CLEANUP_CONFIG } from '../src/report-generator.js';
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
 const templatePath = path.join(serverRoot, 'templates', 'FORMATOS P.R. CANCUN.xlsx');
@@ -115,6 +115,22 @@ async function testServer(context: Parameters<typeof test>[1] extends (context: 
   return { database, databasePath, adminRepository, reportService, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
+function assertUnselectedVariableAreasAreEmpty(book: ExcelJS.Workbook, selectedSheets: string[]) {
+  for (const [sheetName, cleanup] of Object.entries(SHEET_CLEANUP_CONFIG)) {
+    if (selectedSheets.includes(sheetName)) continue;
+    const sheet = book.getWorksheet(sheetName);
+    if (!sheet) continue;
+    for (const address of cleanup.cells) assert.equal(sheet.getCell(address).value, null, `${sheetName}!${address}`);
+    for (const range of cleanup.ranges) {
+      for (let row = range.firstRow; row <= range.lastRow; row += 1) {
+        for (let column = range.firstColumn; column <= range.lastColumn; column += 1) {
+          assert.equal(sheet.getCell(row, column).value, null, `${sheetName}!${row}:${column}`);
+        }
+      }
+    }
+  }
+}
+
 test('health and repeated sync generate one controlled report with three extinguishers', async (context) => {
   const { database, reportService, baseUrl } = await testServer(context);
   const templateHashBefore = fileHash(templatePath);
@@ -187,6 +203,7 @@ test('health and repeated sync generate one controlled report with three extingu
   assert.equal(reportSheet.getColumn(3).width, templateSheet.getColumn(3).width);
   assert.equal(reportSheet.getRow(14).height, templateSheet.getRow(14).height);
   assert.deepEqual(reportSheet.getCell('A14').border, templateSheet.getCell('A14').border);
+  assertUnselectedVariableAreasAreEmpty(reportBook, ['EXTINTORES']);
 
   const list = await fetch(`${baseUrl}/api/reports`);
   assert.equal(list.status, 200);
@@ -247,6 +264,7 @@ test('three hydrants persist, generate the HIDRANTES sheet and remain idempotent
   const templateSheet = templateBook.getWorksheet('HIDRANTES');
   const reportSheet = reportBook.getWorksheet('HIDRANTES');
   assert.ok(templateSheet && reportSheet);
+  assertUnselectedVariableAreasAreEmpty(reportBook, ['HIDRANTES']);
   assert.equal(reportSheet.getCell('F8').value, 'Hotel Piloto');
   assert.equal(reportSheet.getCell('F9').value, 'RED DE HIDRANTES');
   assert.equal(reportSheet.getCell('F10').value, '2026-07-21');
@@ -297,6 +315,7 @@ test('two extinguishers plus two hydrants produce one general workbook', async (
   assert.equal(report.formats, 'Extintores, Hidrantes');
   const book = new ExcelJS.Workbook();
   await book.xlsx.readFile(report.file_path);
+  assertUnselectedVariableAreasAreEmpty(book, ['EXTINTORES', 'HIDRANTES']);
   assert.equal(book.getWorksheet('EXTINTORES')?.getCell('A14').value, '1');
   assert.equal(book.getWorksheet('EXTINTORES')?.getCell('A15').value, '2');
   assert.equal(book.getWorksheet('HIDRANTES')?.getCell('A13').value, '1');
@@ -465,4 +484,146 @@ test('a generation failure keeps the inspection and records the report error', a
   const reportListBody = await reportList.json() as { reports: Array<{ status: string; errorMessage: string }> };
   assert.equal(reportListBody.reports[0].status, 'error');
   assert.match(reportListBody.reports[0].errorMessage, /template not found/i);
+});
+
+test('atomic sync stores selected formats, reports partial support and is idempotent', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const body = {
+    ...payload('inspection-atomic-001'),
+    selectedFormatIds: ['extintores', 'jockey'],
+  };
+  const first = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json() as {
+    syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: { id: string };
+  };
+  assert.deepEqual(firstBody.syncedFormatIds, ['extintores']);
+  assert.deepEqual(firstBody.unsupportedFormatIds, ['jockey']);
+  assert.equal(firstBody.syncStatus, 'partial');
+  assert.ok(firstBody.report.id);
+
+  const repeated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(repeated.status, 200);
+  assert.equal(database.inspectionCount(body.inspectionId), 1);
+  assert.equal(database.extinguisherCount(body.inspectionId), 3);
+  assert.equal(database.reportCount(body.inspectionId), 1);
+  assert.deepEqual(database.getInspectionReportData(body.inspectionId)?.inspection.selectedFormatIds,
+    ['extintores', 'jockey']);
+
+  const unsupportedOnly = {
+    inspectionId: 'inspection-unsupported-only', company: body.company, date: body.date,
+    technician: body.technician, syncVersion: 1, selectedFormatIds: ['jockey'],
+  };
+  const unsupportedResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(unsupportedOnly),
+  });
+  assert.equal(unsupportedResponse.status, 201);
+  const unsupportedBody = await unsupportedResponse.json() as {
+    syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: null;
+  };
+  assert.deepEqual(unsupportedBody.syncedFormatIds, []);
+  assert.deepEqual(unsupportedBody.unsupportedFormatIds, ['jockey']);
+  assert.equal(unsupportedBody.syncStatus, 'partial');
+  assert.equal(unsupportedBody.report, null);
+  assert.equal(database.inspectionCount(unsupportedOnly.inspectionId), 1);
+
+  const extOnly = { ...payload('inspection-atomic-ext-only'), selectedFormatIds: ['extintores'] };
+  const extOnlyResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(extOnly),
+  });
+  const extOnlyBody = await extOnlyResponse.json() as { syncStatus: string; syncedFormatIds: string[] };
+  assert.equal(extOnlyResponse.status, 201);
+  assert.equal(extOnlyBody.syncStatus, 'synced');
+  assert.deepEqual(extOnlyBody.syncedFormatIds, ['extintores']);
+});
+
+test('atomic sync accepts Extintores and Hidrantes together in one report', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-atomic-combined';
+  const response = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...payload(inspectionId), hydrants: hydrantPayload(inspectionId, 2).hydrants,
+      selectedFormatIds: ['extintores', 'hidrantes'],
+    }),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { syncedFormatIds: string[]; syncStatus: string; report: { id: string } };
+  assert.deepEqual(body.syncedFormatIds, ['extintores', 'hidrantes']);
+  assert.equal(body.syncStatus, 'synced');
+  assert.equal(database.extinguisherCount(inspectionId), 3);
+  assert.equal(database.hydrantCount(inspectionId), 2);
+  assert.equal(database.reportCount(inspectionId), 1);
+});
+
+test('atomic sync rolls back inspection data when report generation fails', async (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-atomic-error-'));
+  const databasePath = path.join(directory, 'test.sqlite');
+  const database = new LocalDatabase(databasePath);
+  const adminRepository = new AdminRepository(databasePath);
+  const reportService = new ExtinguisherReportService(database, path.join(directory, 'missing.xlsx'), path.join(directory, 'reports'));
+  const server = createApp(database, [], reportService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  context.after(() => { server.close(); adminRepository.close(); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  await new Promise<void>((resolve) => server.once('listening', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const inspection = { ...payload('inspection-atomic-error'), selectedFormatIds: ['extintores'] };
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(response.status, 500);
+  assert.equal(database.inspectionCount(inspection.inspectionId), 0);
+  assert.equal(database.extinguisherCount(inspection.inspectionId), 0);
+});
+
+test('legacy selected formats migrate from existing child rows without data loss', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-migration-'));
+  const databasePath = path.join(directory, 'legacy.sqlite');
+  let database = new LocalDatabase(databasePath);
+  const inspection = payload('inspection-legacy-migration');
+  database.upsertInspection(inspection);
+  database.close();
+  database = new LocalDatabase(databasePath);
+  assert.equal(database.extinguisherCount(inspection.inspectionId), 3);
+  assert.deepEqual(database.getInspectionReportData(inspection.inspectionId)?.inspection.selectedFormatIds, ['extintores']);
+  database.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('a failed regeneration preserves the previous valid report and exposes a warning', async (context) => {
+  const { database, adminRepository, baseUrl } = await testServer(context);
+  const inspection = { ...payload('inspection-preserve-report'), selectedFormatIds: ['extintores'] };
+  const generated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(generated.status, 201);
+  const generatedBody = await generated.json() as { report: { id: string; downloadUrl: string } };
+
+  const brokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-preserve-error-'));
+  const brokenService = new ExtinguisherReportService(database, path.join(brokenDirectory, 'missing.xlsx'), path.join(brokenDirectory, 'reports'));
+  const brokenServer = createApp(database, [], brokenService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  context.after(() => { brokenServer.close(); fs.rmSync(brokenDirectory, { recursive: true, force: true }); });
+  await new Promise<void>((resolve) => brokenServer.once('listening', resolve));
+  const address = brokenServer.address();
+  assert.ok(address && typeof address === 'object');
+  const failed = await fetch(`http://127.0.0.1:${address.port}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...inspection, syncVersion: 101 }),
+  });
+  assert.equal(failed.status, 500);
+
+  const report = database.getReport(generatedBody.report.id);
+  assert.equal(report?.status, 'generated');
+  assert.equal(report?.last_attempt_status, 'error');
+  assert.match(report?.last_attempt_error ?? '', /template not found/i);
+  assert.equal((await fetch(`${baseUrl}${generatedBody.report.downloadUrl}`)).status, 200);
+  const reportList = await (await fetch(`${baseUrl}/api/reports`)).json() as {
+    reports: Array<{ lastAttemptStatus: string; downloadUrl: string }>;
+  };
+  assert.equal(reportList.reports[0].lastAttemptStatus, 'error');
+  assert.ok(reportList.reports[0].downloadUrl);
 });

@@ -10,6 +10,53 @@ const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-v2';
 const EXTINGUISHER_RANGE = { firstRow: 14, lastRow: 128, firstColumn: 1, lastColumn: 35 };
 const HYDRANT_RANGE = { firstRow: 13, lastRow: 50, firstColumn: 1, lastColumn: 35 };
 
+type CleanupRange = { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number };
+type SheetCleanup = { cells: readonly string[]; ranges: readonly CleanupRange[] };
+
+// Only variable capture areas are cleared. Fixed questions, labels, styles,
+// drawings, merged cells and print settings remain untouched in the template.
+export const SHEET_CLEANUP_CONFIG: Readonly<Record<string, SheetCleanup>> = {
+  'Tablero A&D': { cells: ['F9', 'F10', 'F11', 'F12'], ranges: [
+    { firstRow: 18, lastRow: 46, firstColumn: 17, lastColumn: 22 },
+    { firstRow: 18, lastRow: 46, firstColumn: 27, lastColumn: 36 },
+    { firstRow: 49, lastRow: 57, firstColumn: 1, lastColumn: 36 },
+  ] },
+  'Dispositivos A&D': { cells: ['F9', 'F10', 'F11'], ranges: [
+    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
+  ] },
+  'Dispositivos Convencionales': { cells: ['F9', 'F10', 'F11'], ranges: [
+    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
+  ] },
+  'Dispositivos Notificacion': { cells: ['F9', 'F10', 'F11'], ranges: [
+    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
+  ] },
+  'B Jockey': { cells: ['F9', 'F10', 'F11', 'F12', 'AI10', 'AI11', 'AI12'], ranges: [
+    { firstRow: 17, lastRow: 52, firstColumn: 17, lastColumn: 22 },
+    { firstRow: 17, lastRow: 52, firstColumn: 27, lastColumn: 37 },
+    { firstRow: 55, lastRow: 56, firstColumn: 1, lastColumn: 37 },
+  ] },
+  'B Electrica': { cells: ['F9', 'F10', 'F11', 'F12', 'AI10', 'AI11', 'AI12'], ranges: [
+    { firstRow: 17, lastRow: 57, firstColumn: 17, lastColumn: 22 },
+    { firstRow: 17, lastRow: 57, firstColumn: 27, lastColumn: 37 },
+    { firstRow: 60, lastRow: 61, firstColumn: 1, lastColumn: 37 },
+  ] },
+  'B Diesel': { cells: ['F9', 'F10', 'F11', 'F12', 'AH10', 'AH11', 'AH12'], ranges: [
+    { firstRow: 17, lastRow: 80, firstColumn: 17, lastColumn: 22 },
+    { firstRow: 17, lastRow: 80, firstColumn: 27, lastColumn: 37 },
+    { firstRow: 83, lastRow: 88, firstColumn: 1, lastColumn: 37 },
+  ] },
+  HIDRANTES: { cells: ['F8', 'F9', 'F10'], ranges: [HYDRANT_RANGE] },
+  EXTINTORES: { cells: ['F9', 'F10', 'F11'], ranges: [EXTINGUISHER_RANGE] },
+  'Ansul R-102': { cells: ['F9', 'F10', 'F11', 'F12'], ranges: [
+    { firstRow: 17, lastRow: 33, firstColumn: 17, lastColumn: 22 },
+    { firstRow: 17, lastRow: 33, firstColumn: 23, lastColumn: 36 },
+    { firstRow: 36, lastRow: 44, firstColumn: 1, lastColumn: 39 },
+  ] },
+};
+
 const EXTINGUISHER_COLUMNS = {
   numero: 'A', ubicacion: 'C', tipo_extintor: 'L', capacidad: 'O', proxima_recarga: 'Q',
   presion: 'R', altura: 'U', seguro: 'W', pintura: 'Y', manguera: 'AA', difusor: 'AC',
@@ -144,8 +191,8 @@ class SharedStringWriter {
 
 function clearInspectionCells(
   sheetXml: string,
-  range: { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number },
-  generalCells: string[]
+  ranges: readonly CleanupRange[],
+  generalCells: readonly string[]
 ): string {
   const general = new Set(generalCells);
   return sheetXml.replace(
@@ -155,8 +202,8 @@ function clearInspectionCells(
       if (!address) return cellXml;
       const row = rowNumber(address);
       const column = columnNumber(address);
-      const inside = row >= range.firstRow && row <= range.lastRow
-        && column >= range.firstColumn && column <= range.lastColumn;
+      const inside = ranges.some((range) => row >= range.firstRow && row <= range.lastRow
+        && column >= range.firstColumn && column <= range.lastColumn);
       return inside || general.has(address) ? cellWithValue(cellXml, null) : cellXml;
     }
   );
@@ -175,7 +222,7 @@ async function worksheetPath(zip: JSZip, sheetName: string): Promise<string> {
   const workbookXml = await zip.file('xl/workbook.xml')?.async('string');
   const relationshipsXml = await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
   if (!workbookXml || !relationshipsXml) throw new Error('Invalid XLSX workbook structure');
-  const escapedName = sheetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedName = xmlEscape(sheetName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const sheetTag = workbookXml.match(new RegExp(`<sheet\\b(?=[^>]*\\bname="${escapedName}")[^>]*>`))?.[0];
   const relationshipId = sheetTag?.match(/\br:id="([^"]+)"/)?.[1];
   if (!relationshipId) throw new Error(`Worksheet ${sheetName} was not found in the template`);
@@ -196,11 +243,13 @@ export class ExtinguisherReportService {
     fs.mkdirSync(this.reportsDirectory, { recursive: true });
   }
 
-  async generate(inspectionId: string): Promise<GeneratedReport> {
+  async generate(inspectionId: string, options: { recordFailure?: boolean } = {}): Promise<GeneratedReport> {
     const generatedAt = new Date().toISOString();
     const data = this.database.getInspectionReportData(inspectionId);
     if (!data) throw new Error(`Inspection not found: ${inspectionId}`);
-    if (!data.extinguishers.length && !data.hydrants.length) throw new Error('Inspection has no supported formats');
+    const includesExtinguishers = data.inspection.selectedFormatIds.includes('extintores');
+    const includesHydrants = data.inspection.selectedFormatIds.includes('hidrantes');
+    if (!includesExtinguishers && !includesHydrants) throw new Error('Inspection has no supported formats');
     if (data.extinguishers.length > 115) throw new Error('A report cannot contain more than 115 extinguishers');
     if (data.hydrants.length > 38) throw new Error('A report cannot contain more than 38 hydrants');
 
@@ -216,15 +265,29 @@ export class ExtinguisherReportService {
       if (!sharedStringsFile) throw new Error('Template shared strings were not found');
       const strings = new SharedStringWriter(await sharedStringsFile.async('string'));
 
+      const cleanedSheets = new Map<string, string>();
+      for (const [sheetName, cleanup] of Object.entries(SHEET_CLEANUP_CONFIG)) {
+        let sheetPath: string;
+        try {
+          sheetPath = await worksheetPath(zip, sheetName);
+        } catch (error) {
+          // Small test/custom templates may omit formats. Selected supported
+          // sheets are resolved below and still remain mandatory.
+          if (error instanceof Error && error.message.includes('was not found')) continue;
+          throw error;
+        }
+        const sheetFile = zip.file(sheetPath);
+        if (!sheetFile) throw new Error(`Worksheet XML was not found: ${sheetName}`);
+        cleanedSheets.set(sheetPath, clearInspectionCells(
+          await sheetFile.async('string'), cleanup.ranges, cleanup.cells
+        ));
+      }
       const extPath = await worksheetPath(zip, 'EXTINTORES');
       const hydPath = await worksheetPath(zip, 'HIDRANTES');
-      const extFile = zip.file(extPath);
-      const hydFile = zip.file(hydPath);
-      if (!extFile || !hydFile) throw new Error('Required worksheet XML was not found in the template');
-      let extXml = clearInspectionCells(await extFile.async('string'), EXTINGUISHER_RANGE, ['F9', 'F10', 'F11']);
-      let hydXml = clearInspectionCells(await hydFile.async('string'), HYDRANT_RANGE, ['F8', 'F9', 'F10']);
+      let extXml = cleanedSheets.get(extPath)!;
+      let hydXml = cleanedSheets.get(hydPath)!;
 
-      if (data.extinguishers.length) {
+      if (includesExtinguishers) {
         extXml = writeCell(extXml, 'F9', data.inspection.companyName, strings);
         extXml = writeCell(extXml, 'F10', 'EXTINTORES', strings);
         extXml = writeCell(extXml, 'F11', data.inspection.inspectionDate, strings);
@@ -246,7 +309,7 @@ export class ExtinguisherReportService {
         });
       }
 
-      if (data.hydrants.length) {
+      if (includesHydrants) {
         hydXml = writeCell(hydXml, 'F8', data.inspection.companyName, strings);
         hydXml = writeCell(hydXml, 'F9', 'RED DE HIDRANTES', strings);
         hydXml = writeCell(hydXml, 'F10', data.inspection.inspectionDate, strings);
@@ -266,11 +329,12 @@ export class ExtinguisherReportService {
         });
       }
 
-      zip.file(extPath, extXml);
-      zip.file(hydPath, hydXml);
+      cleanedSheets.set(extPath, extXml);
+      cleanedSheets.set(hydPath, hydXml);
+      for (const [sheetPath, sheetXml] of cleanedSheets) zip.file(sheetPath, sheetXml);
       let sharedStringReferences = 0;
       for (const entryName of Object.keys(zip.files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name))) {
-        const xml = entryName === extPath ? extXml : entryName === hydPath ? hydXml : await zip.file(entryName)!.async('string');
+        const xml = cleanedSheets.get(entryName) ?? await zip.file(entryName)!.async('string');
         sharedStringReferences += (xml.match(/\bt="s"/g) ?? []).length;
       }
       zip.file('xl/sharedStrings.xml', strings.finalize(sharedStringReferences));
@@ -283,20 +347,23 @@ export class ExtinguisherReportService {
         inspectionId, formatType: FORMAT_TYPE, filename, filePath: targetPath, generatedAt,
         status: 'generated', errorMessage: null, templateVersion: TEMPLATE_VERSION,
       });
-      if (previous?.file_path && previous.file_path !== targetPath && isInsideDirectory(previous.file_path, this.reportsDirectory)) {
-        fs.rmSync(previous.file_path, { force: true });
-      }
       return report;
     } catch (error) {
       fs.rmSync(temporaryPath, { force: true });
+      if (previous?.file_path !== targetPath && isInsideDirectory(targetPath, this.reportsDirectory)) {
+        fs.rmSync(targetPath, { force: true });
+      }
       const message = error instanceof Error ? error.message.slice(0, 2000) : 'Unknown report generation error';
-      this.database.saveGeneratedReport({
-        inspectionId, formatType: FORMAT_TYPE, filename: previous?.filename ?? filename,
-        filePath: previous?.file_path ?? '', generatedAt, status: 'error', errorMessage: message,
-        templateVersion: TEMPLATE_VERSION,
-      });
+      if (options.recordFailure !== false) {
+        this.database.saveReportAttemptFailure(inspectionId, FORMAT_TYPE, message, generatedAt);
+      }
       throw error;
     }
+  }
+
+  recordFailedAttempt(inspectionId: string, error: unknown) {
+    const message = error instanceof Error ? error.message.slice(0, 2000) : 'Unknown report generation error';
+    this.database.saveReportAttemptFailure(inspectionId, FORMAT_TYPE, message, new Date().toISOString());
   }
 
   resolveDownload(reportId: string): { report: GeneratedReport; filePath: string } | undefined {
@@ -318,7 +385,7 @@ export class ExtinguisherReportService {
     let suffix = 2;
     while (true) {
       const owner = this.database.getReportByFilename(candidate);
-      if (!owner || owner.id === previous?.id) return candidate;
+      if (!owner) return candidate;
       candidate = `${base}_${suffix++}.xlsx`;
     }
   }

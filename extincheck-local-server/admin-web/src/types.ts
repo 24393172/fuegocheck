@@ -39,6 +39,9 @@ export interface Report {
   generatedAt: string;
   status: 'generated' | 'error';
   errorMessage: string | null;
+  lastAttemptAt: string | null;
+  lastAttemptStatus: 'generated' | 'error' | null;
+  lastAttemptError: string | null;
   templateVersion: string;
   companyName: string;
   inspectionDate: string;

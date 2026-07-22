@@ -25,6 +25,12 @@ export interface HydrantSyncPayload {
   syncVersion: number;
 }
 
+export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'extinguishers'> {
+  selectedFormatIds: string[];
+  extinguishers?: ExtinguisherRecord[];
+  hydrants?: HydrantRecord[];
+}
+
 type ExtinguisherServerRecord = Omit<
   ExtinguisherRecord,
   'locationId' | 'locationNameSnapshot' | 'customLocation'
@@ -43,12 +49,28 @@ export interface SyncResponse {
   extinguishersReceived?: number;
   hydrantsReceived?: number;
   syncedAt: string;
+  syncedFormatIds?: string[];
+  unsupportedFormatIds?: string[];
+  syncStatus?: 'partial' | 'synced';
   report: {
     id: string;
     filename: string;
     downloadUrl: string;
     generatedAt: string;
+  } | null;
+}
+
+export function syncInspection(payload: InspectionSyncPayload): Promise<SyncResponse> {
+  const serverPayload = {
+    ...payload,
+    extinguishers: payload.extinguishers?.map(toExtinguisherServerRecord),
+    hydrants: payload.hydrants?.map(toHydrantServerRecord),
   };
+  return requestLocalServer<SyncResponse>('/api/inspections/sync', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(serverPayload),
+  });
 }
 
 export class LocalServerApiError extends Error {
@@ -170,36 +192,29 @@ export function syncExtinguisherInspection(
 export function syncHydrantInspection(payload: HydrantSyncPayload): Promise<SyncResponse> {
   const serverPayload = {
     ...payload,
-    hydrants: payload.hydrants.map((record) => ({
-      id: record.id,
-      numero: record.numero,
-      locationId: record.locationId,
-      locationNameSnapshot: record.locationNameSnapshot || record.ubicacion,
-      customLocation: record.customLocation,
-      gabinete: record.gabinete,
-      gabinete_comentario: record.gabinete_comentario,
-      senalamiento: record.senalamiento,
-      senalamiento_comentario: record.senalamiento_comentario,
-      calcomania: record.calcomania,
-      calcomania_comentario: record.calcomania_comentario,
-      valvula_angular: record.valvula_angular,
-      valvula_angular_comentario: record.valvula_angular_comentario,
-      manguera: record.manguera,
-      manguera_comentario: record.manguera_comentario,
-      chiflon: record.chiflon,
-      chiflon_comentario: record.chiflon_comentario,
-      llave_acople: record.llave_acople,
-      llave_acople_comentario: record.llave_acople_comentario,
-      observaciones: record.observaciones,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-    })),
+    hydrants: payload.hydrants.map(toHydrantServerRecord),
   };
   return requestLocalServer<SyncResponse>('/api/inspections/hydrants', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(serverPayload),
   });
+}
+
+function toHydrantServerRecord(record: HydrantRecord) {
+  return {
+    id: record.id, numero: record.numero, locationId: record.locationId,
+    locationNameSnapshot: record.locationNameSnapshot || record.ubicacion,
+    customLocation: record.customLocation, gabinete: record.gabinete,
+    gabinete_comentario: record.gabinete_comentario, senalamiento: record.senalamiento,
+    senalamiento_comentario: record.senalamiento_comentario, calcomania: record.calcomania,
+    calcomania_comentario: record.calcomania_comentario, valvula_angular: record.valvula_angular,
+    valvula_angular_comentario: record.valvula_angular_comentario, manguera: record.manguera,
+    manguera_comentario: record.manguera_comentario, chiflon: record.chiflon,
+    chiflon_comentario: record.chiflon_comentario, llave_acople: record.llave_acople,
+    llave_acople_comentario: record.llave_acople_comentario, observaciones: record.observaciones,
+    createdAt: record.createdAt, updatedAt: record.updatedAt,
+  };
 }
 
 export function toExtinguisherServerRecord(

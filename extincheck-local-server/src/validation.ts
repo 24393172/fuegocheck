@@ -132,3 +132,50 @@ export const hydrantInspectionSchema = z.object({
 });
 
 export type HydrantInspectionPayload = z.infer<typeof hydrantInspectionSchema>;
+
+export const inspectionFormatIdSchema = z.enum([
+  'jockey', 'diesel', 'electrica', 'tablero_ad', 'dispositivos_ad',
+  'dispositivos_convencionales', 'dispositivos_notificacion', 'hidrantes',
+  'extintores', 'ansul_r102',
+]);
+
+const commonInspectionShape = {
+  inspectionId: id,
+  company: z.object({ id: id.nullish(), name: z.string().trim().min(1).max(200) }).strict(),
+  branch: z.object({ id: id.nullish(), name: shortText }).strict().nullish(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must use YYYY-MM-DD'),
+  technician: z.object({ id: id.nullish(), name: z.string().trim().min(1).max(200) }).strict(),
+  sourceDeviceId: id.nullish(),
+  syncVersion: z.number().int().nonnegative(),
+};
+
+export const inspectionSyncSchema = z.object({
+  ...commonInspectionShape,
+  selectedFormatIds: z.array(inspectionFormatIdSchema).min(1),
+  extinguishers: z.array(extinguisherSchema).max(115).optional(),
+  hydrants: z.array(hydrantSchema).max(38).optional(),
+}).strict().superRefine((payload, context) => {
+  const selected = new Set(payload.selectedFormatIds);
+  if (selected.size !== payload.selectedFormatIds.length) {
+    context.addIssue({ code: 'custom', path: ['selectedFormatIds'], message: 'Duplicate format id' });
+  }
+  for (const [formatId, records] of [
+    ['extintores', payload.extinguishers], ['hidrantes', payload.hydrants],
+  ] as const) {
+    if (selected.has(formatId) && (!records || records.length === 0)) {
+      context.addIssue({ code: 'custom', path: [formatId], message: `Selected format ${formatId} requires records` });
+    }
+    if (!selected.has(formatId) && records !== undefined) {
+      context.addIssue({ code: 'custom', path: [formatId], message: `Records supplied for unselected format ${formatId}` });
+    }
+    const recordIds = new Set<string>();
+    records?.forEach((record, index) => {
+      if (recordIds.has(record.id)) context.addIssue({
+        code: 'custom', path: [formatId, index, 'id'], message: `Duplicate ${formatId} id`,
+      });
+      recordIds.add(record.id);
+    });
+  }
+});
+
+export type InspectionSyncPayload = z.infer<typeof inspectionSyncSchema>;
