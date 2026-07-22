@@ -1,4 +1,4 @@
-export type InspectionStatus = 'draft' | 'pending' | 'completed' | 'sent';
+export type InspectionStatus = 'draft' | 'pending' | 'completed' | 'mail_composer_opened' | 'sent';
 export type SyncStatus = 'pending' | 'syncing' | 'partial' | 'synced' | 'error';
 
 // A site inspection (form_type 'site_v1') stores shared site data once and a
@@ -47,6 +47,9 @@ export interface Inspection {
   synced_at: number | null;
   sync_error: string | null;
   synced_format_ids: string;
+  official_report_id: string | null;
+  official_report_filename: string | null;
+  official_report_download_url: string | null;
 }
 
 // Lightweight row for list screens (dashboard, history). Excludes the heavy

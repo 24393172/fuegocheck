@@ -105,7 +105,7 @@ export default function FillScreen() {
         }
 
         const fullData = parseFormData(insp);
-        setIsReadOnly(readonly === '1' || insp.status === 'completed' || insp.status === 'sent');
+        setIsReadOnly(readonly === '1' || insp.status === 'completed' || insp.status === 'mail_composer_opened' || insp.status === 'sent');
         if (!fullData.pumps || typeof fullData.pumps !== 'object') fullData.pumps = {};
         fullDataRef.current = fullData;
 

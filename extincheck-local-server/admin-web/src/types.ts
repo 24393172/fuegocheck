@@ -42,6 +42,9 @@ export interface Report {
   lastAttemptAt: string | null;
   lastAttemptStatus: 'generated' | 'error' | null;
   lastAttemptError: string | null;
+  signatureAvailable: boolean;
+  signatureSignerName: string | null;
+  signatureSignedAt: string | null;
   templateVersion: string;
   companyName: string;
   inspectionDate: string;

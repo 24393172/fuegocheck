@@ -5,6 +5,37 @@ const shortText = z.string().trim().max(200);
 const mediumText = z.string().trim().max(500);
 const longText = z.string().trim().max(2000);
 const checkValue = z.enum(['si', 'no', 'na']);
+const MAX_SIGNATURE_BYTES = 1024 * 1024;
+const MAX_SIGNATURE_DIMENSION = 4096;
+
+function pngDimensions(bytes: Buffer): { width: number; height: number } | null {
+  if (bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') return null;
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+export const inspectionSignatureSchema = z.object({
+  mimeType: z.literal('image/png'),
+  dataBase64: z.string().min(1).max(Math.ceil(MAX_SIGNATURE_BYTES * 4 / 3) + 8)
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Signature must be valid Base64'),
+  signedAt: z.string().datetime(),
+  signerName: z.string().trim().min(1).max(200),
+}).strict().superRefine((signature, context) => {
+  const bytes = Buffer.from(signature.dataBase64, 'base64');
+  if (bytes.length === 0 || bytes.length > MAX_SIGNATURE_BYTES
+      || bytes.toString('base64').replace(/=+$/, '') !== signature.dataBase64.replace(/=+$/, '')) {
+    context.addIssue({ code: 'custom', path: ['dataBase64'], message: 'Invalid or oversized signature image' });
+    return;
+  }
+  const dimensions = pngDimensions(bytes);
+  if (!dimensions) {
+    context.addIssue({ code: 'custom', path: ['dataBase64'], message: 'Signature is not a valid PNG image' });
+    return;
+  }
+  if (!dimensions.width || !dimensions.height
+      || dimensions.width > MAX_SIGNATURE_DIMENSION || dimensions.height > MAX_SIGNATURE_DIMENSION) {
+    context.addIssue({ code: 'custom', path: ['dataBase64'], message: 'Signature image dimensions are invalid' });
+  }
+});
 
 export const extinguisherSchema = z.object({
   id,
@@ -154,6 +185,7 @@ export const inspectionSyncSchema = z.object({
   selectedFormatIds: z.array(inspectionFormatIdSchema).min(1),
   extinguishers: z.array(extinguisherSchema).max(115).optional(),
   hydrants: z.array(hydrantSchema).max(38).optional(),
+  signature: inspectionSignatureSchema.nullable().optional(),
 }).strict().superRefine((payload, context) => {
   const selected = new Set(payload.selectedFormatIds);
   if (selected.size !== payload.selectedFormatIds.length) {

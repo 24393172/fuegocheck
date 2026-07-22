@@ -89,6 +89,22 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_hydrants_inspection
       ON hydrants(inspection_id);
 
+      CREATE TABLE IF NOT EXISTS inspection_signatures (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        signature_type TEXT NOT NULL,
+        mime_type TEXT NOT NULL CHECK (mime_type = 'image/png'),
+        file_path TEXT NOT NULL,
+        signer_name TEXT NOT NULL,
+        signed_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (inspection_id, signature_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_signatures_inspection
+      ON inspection_signatures(inspection_id);
+
       CREATE TABLE IF NOT EXISTS generated_reports (
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
@@ -165,6 +181,34 @@ export class LocalDatabase {
     if (!selectedIds.includes('hidrantes')) {
       this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(inspectionId);
     }
+  }
+  getInspectionSignature(inspectionId: string, signatureType = 'technician'): InspectionSignature | undefined {
+    return this.database.prepare(`SELECT id, inspection_id, signature_type, mime_type, file_path,
+      signer_name, signed_at, created_at, updated_at FROM inspection_signatures
+      WHERE inspection_id = ? AND signature_type = ?`).get(inspectionId, signatureType) as InspectionSignature | undefined;
+  }
+  upsertInspectionSignature(input: {
+    inspectionId: string; signatureType: string; mimeType: 'image/png'; filePath: string;
+    signerName: string; signedAt: string;
+  }): InspectionSignature {
+    const now = new Date().toISOString();
+    const existing = this.getInspectionSignature(input.inspectionId, input.signatureType);
+    const id = existing?.id ?? randomUUID();
+    this.database.prepare(`INSERT INTO inspection_signatures (
+      id, inspection_id, signature_type, mime_type, file_path, signer_name,
+      signed_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(inspection_id, signature_type) DO UPDATE SET
+      mime_type=excluded.mime_type, file_path=excluded.file_path, signer_name=excluded.signer_name,
+      signed_at=excluded.signed_at, updated_at=excluded.updated_at`).run(
+      id, input.inspectionId, input.signatureType, input.mimeType, input.filePath,
+      input.signerName, input.signedAt, existing?.created_at ?? now, now
+    );
+    return this.getInspectionSignature(input.inspectionId, input.signatureType)!;
+  }
+  deleteInspectionSignature(inspectionId: string, signatureType = 'technician') {
+    this.database.prepare('DELETE FROM inspection_signatures WHERE inspection_id = ? AND signature_type = ?')
+      .run(inspectionId, signatureType);
   }
   upsertInspectionMetadata(payload: Omit<ExtinguisherInspectionPayload, 'extinguishers'>): boolean {
     const now = new Date().toISOString();
@@ -386,6 +430,11 @@ export class LocalDatabase {
     ).get(inspectionId) as { count: number };
     return row.count;
   }
+  signatureCount(inspectionId: string): number {
+    const row = this.database.prepare('SELECT COUNT(*) AS count FROM inspection_signatures WHERE inspection_id = ?')
+      .get(inspectionId) as { count: number };
+    return row.count;
+  }
 
   getInspectionReportData(inspectionId: string): InspectionReportData | undefined {
     const inspection = this.database.prepare(`
@@ -419,7 +468,8 @@ export class LocalDatabase {
     `).all(inspectionId) as Array<Omit<HydrantInspectionPayload['hydrants'][number], 'customLocation'> & { customLocation: number }>;
     const hydrants = rawHydrants.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
     inspection.selectedFormatIds = JSON.parse(inspection.selectedFormatIdsJson || '[]') as string[];
-    return { inspection, extinguishers, hydrants };
+    const signature = this.getInspectionSignature(inspectionId);
+    return { inspection, extinguishers, hydrants, signature };
   }
 
   saveGeneratedReport(input: {
@@ -489,7 +539,14 @@ export class LocalDatabase {
     };
     let ids: string[] = [];
     try { ids = JSON.parse(report.selected_format_ids || '[]') as string[]; } catch { /* legacy row */ }
-    return { ...report, formats: ids.map((id) => labels[id] ?? id).join(', ') || report.formats };
+    const signature = this.getInspectionSignature(report.inspection_id);
+    return {
+      ...report,
+      formats: ids.map((id) => labels[id] ?? id).join(', ') || report.formats,
+      signature_available: signature ? 1 : 0,
+      signature_signer_name: signature?.signer_name ?? null,
+      signature_signed_at: signature?.signed_at ?? null,
+    };
   }
 
   getReport(id: string): GeneratedReport | undefined {
@@ -624,6 +681,21 @@ export interface GeneratedReport {
   last_attempt_at: string | null;
   last_attempt_status: 'generated' | 'error' | null;
   last_attempt_error: string | null;
+  signature_available: number;
+  signature_signer_name: string | null;
+  signature_signed_at: string | null;
+}
+
+export interface InspectionSignature {
+  id: string;
+  inspection_id: string;
+  signature_type: string;
+  mime_type: 'image/png';
+  file_path: string;
+  signer_name: string;
+  signed_at: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface InspectionReportData {
@@ -641,4 +713,5 @@ export interface InspectionReportData {
   };
   extinguishers: ExtinguisherInspectionPayload['extinguishers'];
   hydrants: HydrantInspectionPayload['hydrants'];
+  signature: InspectionSignature | undefined;
 }

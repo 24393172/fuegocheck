@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 import { GeneratedReport, InspectionReportData, LocalDatabase } from './database.js';
 
 const FORMAT_TYPE = 'inspection';
-const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-v2';
+const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-signature-v3';
 
 const EXTINGUISHER_RANGE = { firstRow: 14, lastRow: 128, firstColumn: 1, lastColumn: 35 };
 const HYDRANT_RANGE = { firstRow: 13, lastRow: 50, firstColumn: 1, lastColumn: 35 };
@@ -234,6 +234,128 @@ async function worksheetPath(zip: JSZip, sheetName: string): Promise<string> {
   return normalized.startsWith('xl/') ? normalized : `xl/${normalized}`;
 }
 
+function pngSize(bytes: Buffer): { width: number; height: number } {
+  if (bytes.length < 24 || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') {
+    throw new Error('Stored technician signature is not a valid PNG');
+  }
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
+function inlineCell(address: string, value: string, style: number): string {
+  return `<c r="${address}" s="${style}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+}
+
+function formatNames(ids: string[]): string {
+  const labels: Record<string, string> = { extintores: 'EXTINTORES', hidrantes: 'HIDRANTES' };
+  return ids.map((id) => labels[id] ?? id).join(', ');
+}
+
+async function addSignaturesWorksheet(zip: JSZip, data: InspectionReportData): Promise<void> {
+  const workbookFile = zip.file('xl/workbook.xml');
+  const relationshipsFile = zip.file('xl/_rels/workbook.xml.rels');
+  const contentTypesFile = zip.file('[Content_Types].xml');
+  if (!workbookFile || !relationshipsFile || !contentTypesFile) throw new Error('Invalid workbook package');
+  let workbookXml = await workbookFile.async('string');
+  let relationshipsXml = await relationshipsFile.async('string');
+  let contentTypesXml = await contentTypesFile.async('string');
+
+  const sheetNumber = Math.max(0, ...Object.keys(zip.files).map((name) =>
+    Number(/^xl\/worksheets\/sheet(\d+)\.xml$/.exec(name)?.[1] ?? 0))) + 1;
+  const drawingNumber = Math.max(0, ...Object.keys(zip.files).map((name) =>
+    Number(/^xl\/drawings\/drawing(\d+)\.xml$/.exec(name)?.[1] ?? 0))) + 1;
+  const relationshipId = Math.max(0, ...[...relationshipsXml.matchAll(/\bId="rId(\d+)"/g)]
+    .map((match) => Number(match[1]))) + 1;
+  const sheetId = Math.max(0, ...[...workbookXml.matchAll(/\bsheetId="(\d+)"/g)]
+    .map((match) => Number(match[1]))) + 1;
+
+  const signature = data.signature;
+  const signedAt = signature ? new Date(signature.signed_at).toLocaleString('es-MX') : 'Sin firma registrada';
+  const signerName = signature?.signer_name ?? data.inspection.technicianName;
+  const rows = [
+    `<row r="3" ht="28" customHeight="1">${inlineCell('A3', 'FUEGO & SEGURIDAD', 77)}</row>`,
+    `<row r="5" ht="24" customHeight="1">${inlineCell('A5', 'FIRMA DE INSPECCIÓN', 77)}</row>`,
+    `<row r="8">${inlineCell('A8', 'CLIENTE:', 71)}${inlineCell('I8', data.inspection.companyName, 73)}</row>`,
+    `<row r="9">${inlineCell('A9', 'INSPECCIÓN:', 71)}${inlineCell('I9', data.inspection.id, 73)}</row>`,
+    `<row r="10">${inlineCell('A10', 'FORMATOS:', 71)}${inlineCell('I10', formatNames(data.inspection.selectedFormatIds), 73)}</row>`,
+    `<row r="11">${inlineCell('A11', 'FECHA:', 71)}${inlineCell('I11', data.inspection.inspectionDate, 73)}</row>`,
+    `<row r="13" ht="22" customHeight="1">${inlineCell('A13', 'FIRMA DEL TÉCNICO', 77)}</row>`,
+    `<row r="30">${inlineCell('A30', 'TÉCNICO:', 71)}${inlineCell('I30', signerName, 73)}</row>`,
+    `<row r="31">${inlineCell('A31', 'FIRMADO:', 71)}${inlineCell('I31', signedAt, 73)}</row>`,
+  ].join('');
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+    `<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><dimension ref="A1:AI34"/>` +
+    `<sheetViews><sheetView workbookViewId="0" showGridLines="0"/></sheetViews>` +
+    `<sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="35" width="3" customWidth="1"/></cols>` +
+    `<sheetData>${rows}</sheetData>` +
+    `<mergeCells count="12"><mergeCell ref="A3:AI3"/><mergeCell ref="A5:AI5"/>` +
+    `<mergeCell ref="A8:H8"/><mergeCell ref="I8:AI8"/><mergeCell ref="A9:H9"/><mergeCell ref="I9:AI9"/>` +
+    `<mergeCell ref="A10:H10"/><mergeCell ref="I10:AI10"/><mergeCell ref="A11:H11"/><mergeCell ref="I11:AI11"/>` +
+    `<mergeCell ref="A13:AI13"/><mergeCell ref="A30:H30"/><mergeCell ref="I30:AI30"/><mergeCell ref="A31:H31"/><mergeCell ref="I31:AI31"/></mergeCells>` +
+    `<pageMargins left="0.25" right="0.25" top="0.3" bottom="0.3" header="0" footer="0"/>` +
+    `<pageSetup orientation="landscape" paperSize="1" fitToWidth="1" fitToHeight="1"/>` +
+    `<drawing r:id="rId1"/></worksheet>`;
+  // The count attribute is advisory; using the actual number avoids Excel repair warnings.
+  const normalizedSheetXml = sheetXml.replace('mergeCells count="12"', 'mergeCells count="15"');
+  zip.file(`xl/worksheets/sheet${sheetNumber}.xml`, normalizedSheetXml);
+  zip.file(`xl/worksheets/_rels/sheet${sheetNumber}.xml.rels`,
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${drawingNumber}.xml"/></Relationships>`);
+
+  let pictureXml = '';
+  let drawingRelationships = '';
+  if (signature) {
+    if (!fs.existsSync(signature.file_path)) throw new Error('Stored technician signature file was not found');
+    const bytes = fs.readFileSync(signature.file_path);
+    const dimensions = pngSize(bytes);
+    const maxWidth = 4_500_000;
+    const maxHeight = 1_500_000;
+    const scale = Math.min(maxWidth / dimensions.width, maxHeight / dimensions.height);
+    const width = Math.round(dimensions.width * scale);
+    const height = Math.round(dimensions.height * scale);
+    const colOffset = Math.round((maxWidth - width) / 2);
+    const rowOffset = Math.round((maxHeight - height) / 2);
+    const imageName = `signature${sheetNumber}.png`;
+    zip.file(`xl/media/${imageName}`, bytes);
+    pictureXml = `<xdr:oneCellAnchor><xdr:from><xdr:col>7</xdr:col><xdr:colOff>${colOffset}</xdr:colOff><xdr:row>14</xdr:row><xdr:rowOff>${rowOffset}</xdr:rowOff></xdr:from>` +
+      `<xdr:ext cx="${width}" cy="${height}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Firma del técnico"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>` +
+      `<xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>` +
+      `<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>`;
+    drawingRelationships = `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imageName}"/>`;
+  }
+  const borderShape = `<xdr:twoCellAnchor><xdr:from><xdr:col>7</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>14</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>` +
+    `<xdr:to><xdr:col>28</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>28</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>` +
+    `<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="Área de firma"/><xdr:cNvSpPr/></xdr:nvSpPr>` +
+    `<xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="1F2937"/></a:solidFill></a:ln></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>`;
+  zip.file(`xl/drawings/drawing${drawingNumber}.xml`,
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${pictureXml}${borderShape}</xdr:wsDr>`);
+  if (drawingRelationships) {
+    zip.file(`xl/drawings/_rels/drawing${drawingNumber}.xml.rels`,
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${drawingRelationships}</Relationships>`);
+  }
+
+  workbookXml = workbookXml.replace('</sheets>', `<sheet name="FIRMAS" sheetId="${sheetId}" r:id="rId${relationshipId}"/></sheets>`);
+  relationshipsXml = relationshipsXml.replace('</Relationships>',
+    `<Relationship Id="rId${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetNumber}.xml"/></Relationships>`);
+  contentTypesXml = contentTypesXml.replace('</Types>',
+    `<Override PartName="/xl/worksheets/sheet${sheetNumber}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+    `<Override PartName="/xl/drawings/drawing${drawingNumber}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`);
+  zip.file('xl/workbook.xml', workbookXml);
+  zip.file('xl/_rels/workbook.xml.rels', relationshipsXml);
+  zip.file('[Content_Types].xml', contentTypesXml);
+
+  const appFile = zip.file('docProps/app.xml');
+  if (appFile) {
+    let appXml = await appFile.async('string');
+    appXml = appXml.replace(/(<vt:lpstr>Hojas de cálculo<\/vt:lpstr><\/vt:variant><vt:variant><vt:i4>)10(<\/vt:i4>)/,
+      (_match, before: string, after: string) => `${before}11${after}`);
+    appXml = appXml.replace(/(<TitlesOfParts><vt:vector size=")16(" baseType="lpstr">)/,
+      (_match, before: string, after: string) => `${before}17${after}`);
+    appXml = appXml.replace('<vt:lpstr>Ansul R-102</vt:lpstr>',
+      '<vt:lpstr>Ansul R-102</vt:lpstr><vt:lpstr>FIRMAS</vt:lpstr>');
+    zip.file('docProps/app.xml', appXml);
+  }
+}
+
 export class ExtinguisherReportService {
   constructor(
     private readonly database: LocalDatabase,
@@ -332,6 +454,7 @@ export class ExtinguisherReportService {
       cleanedSheets.set(extPath, extXml);
       cleanedSheets.set(hydPath, hydXml);
       for (const [sheetPath, sheetXml] of cleanedSheets) zip.file(sheetPath, sheetXml);
+      await addSignaturesWorksheet(zip, data);
       let sharedStringReferences = 0;
       for (const entryName of Object.keys(zip.files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name))) {
         const xml = cleanedSheets.get(entryName) ?? await zip.file(entryName)!.async('string');

@@ -27,6 +27,7 @@ const FILTERS: { key: FilterOption; label: string }[] = [
   { key: 'draft', label: 'Borrador' },
   { key: 'pending', label: 'Pendientes' },
   { key: 'completed', label: 'Por enviar' },
+  { key: 'mail_composer_opened', label: 'Correo abierto' },
   { key: 'sent', label: 'Enviadas' },
 ];
 

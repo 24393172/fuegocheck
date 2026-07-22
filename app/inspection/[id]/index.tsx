@@ -22,7 +22,7 @@ import {
   normalizeSelectedFormatIds,
   schemasForSelectedFormatIds,
 } from '../../../lib/inspection-formats';
-import { getInspection, updateInspection, updateStatus, updateSyncState } from '../../../lib/repositories/inspections.repo';
+import { getInspection, updateInspection, updateOfficialReport, updateStatus, updateSyncState } from '../../../lib/repositories/inspections.repo';
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
 import { PUMP_SCHEMAS } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
@@ -146,7 +146,7 @@ export default function InspectionIndexScreen() {
 
   function handleComplete() {
     if (!inspection) return;
-    if (inspection.status === 'completed' || inspection.status === 'sent') {
+    if (inspection.status === 'completed' || inspection.status === 'mail_composer_opened' || inspection.status === 'sent') {
       router.push(`/inspection/${id}/pdf-preview`);
       return;
     }
@@ -257,12 +257,19 @@ export default function InspectionIndexScreen() {
           ? normalizeExtinguisherCollection(currentPumps.extintores).collection.items : undefined,
         hydrants: selectedIds.includes('hidrantes')
           ? normalizeHydrantsData(currentPumps.hidrantes).collection.items : undefined,
+        signature: signature ? {
+          mimeType: 'image/png',
+          dataBase64: signature.image_base64.replace(/^data:image\/png;base64,/, ''),
+          signedAt: new Date(signature.signed_at).toISOString(),
+          signerName: currentInspection.technician_name,
+        } : null,
       });
 
       const syncedAt = Date.now();
       const syncedFormatIds = response.syncedFormatIds ?? [];
       const outcome = resolveSyncOutcome(selectedIds, syncedFormatIds);
       await updateSyncState(id, outcome.status, outcome.message, syncedFormatIds);
+      await updateOfficialReport(id, response.report);
       setInspection((current) => current ? {
         ...current,
         sync_status: outcome.status,
@@ -270,6 +277,9 @@ export default function InspectionIndexScreen() {
         last_sync_attempt: syncedAt,
         sync_error: outcome.message,
         synced_format_ids: JSON.stringify(syncedFormatIds),
+        official_report_id: response.report?.id ?? null,
+        official_report_filename: response.report?.filename ?? null,
+        official_report_download_url: response.report?.downloadUrl ?? null,
       } : current);
       Alert.alert('Sincronización completa', 'Inspección sincronizada correctamente con el servidor local.');
     } catch (error) {
@@ -309,7 +319,7 @@ export default function InspectionIndexScreen() {
   }
 
   const site = getSiteData(inspection);
-  const locked = inspection.status === 'completed' || inspection.status === 'sent';
+  const locked = inspection.status === 'completed' || inspection.status === 'mail_composer_opened' || inspection.status === 'sent';
   const selectedFormatIds = normalizeSelectedFormatIds(parseFormData(inspection).selectedFormatIds);
   const schemas = schemasForSelectedFormatIds(selectedFormatIds);
   const pumpIds = new Set(PUMP_SCHEMAS.map((schema) => schema.id));

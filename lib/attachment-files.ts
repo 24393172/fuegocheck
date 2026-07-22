@@ -12,7 +12,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 // - cleanupOldAttachmentFiles() runs at app startup and prunes files older than
 //   MAX_AGE_MS (by then any pending Gmail send has long finished).
 
-const ATTACHMENT_PATTERN = /^(inspeccion_.*\.xlsx|firma_.*\.png)$/;
+const ATTACHMENT_PATTERN = /^(inspeccion_.*\.xlsx|reporte_oficial_.*\.xlsx|firma_.*\.png)$/;
 const MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
 export async function cleanupOldAttachmentFiles(): Promise<void> {
@@ -43,7 +43,7 @@ export async function deleteAttachmentFilesForInspection(inspectionId: string): 
     const shortId = inspectionId.slice(0, 8);
     const names = await FileSystem.readDirectoryAsync(dir);
     for (const name of names) {
-      if (ATTACHMENT_PATTERN.test(name) && name.includes(`_${shortId}.`)) {
+    if (ATTACHMENT_PATTERN.test(name) && (name.includes(`_${shortId}.`) || name.includes(`_${shortId}_`))) {
         await FileSystem.deleteAsync(dir + name, { idempotent: true });
       }
     }

@@ -2,6 +2,7 @@ import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { ZodError } from 'zod';
 import { AdminRepository } from './admin-repository.js';
 import { createAdminRouter } from './admin-router.js';
@@ -17,6 +18,11 @@ function serializeSync<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+function isInsideDirectory(filePath: string, directory: string): boolean {
+  const relative = path.relative(path.resolve(directory), path.resolve(filePath));
+  return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 export function createApp(
   database: LocalDatabase,
   allowedOrigins: string[],
@@ -25,6 +31,8 @@ export function createApp(
   adminWebPath: string
 ) {
   const app = express();
+  const signaturesDirectory = path.join(path.dirname(database.filePath), 'signatures');
+  fs.mkdirSync(signaturesDirectory, { recursive: true });
   app.disable('x-powered-by');
   app.use(cors({
     origin(origin, callback) {
@@ -36,7 +44,9 @@ export function createApp(
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
   }));
-  app.use(express.json({ limit: '1mb', strict: true }));
+  // The request also contains inspection data, so transport overhead must be
+  // larger than the validated 1 MiB decoded PNG signature limit.
+  app.use(express.json({ limit: '2mb', strict: true }));
 
   app.get('/api/health', (_request, response) => {
     response.json({
@@ -151,18 +161,49 @@ export function createApp(
         const supported: string[] = payload.selectedFormatIds.filter(
           (id) => id === 'extintores' || id === 'hidrantes'
         );
-        database.beginSync();
+        const previousSignature = database.getInspectionSignature(payload.inspectionId);
+        const newSignaturePath = payload.signature && path.join(signaturesDirectory, `${randomUUID()}.png`);
+        const stagedSignaturePath = newSignaturePath && `${newSignaturePath}.pending`;
+        let transactionStarted = false;
         try {
+          if (payload.signature && stagedSignaturePath) {
+            fs.writeFileSync(stagedSignaturePath, Buffer.from(payload.signature.dataBase64, 'base64'), { flag: 'wx' });
+          }
+          database.beginSync();
+          transactionStarted = true;
           const created = database.upsertInspectionMetadata(payload);
           if (payload.extinguishers) database.upsertInspection({ ...payload, extinguishers: payload.extinguishers }, false);
           if (payload.hydrants) database.upsertHydrantInspection({ ...payload, hydrants: payload.hydrants }, false);
           database.clearUnselectedSupportedFormats(payload.inspectionId, payload.selectedFormatIds);
           database.setSelectedFormatIds(payload.inspectionId, payload.selectedFormatIds);
+          if (payload.signature !== undefined) {
+            if (payload.signature && newSignaturePath && stagedSignaturePath) {
+              fs.renameSync(stagedSignaturePath, newSignaturePath);
+              database.upsertInspectionSignature({
+                inspectionId: payload.inspectionId, signatureType: 'technician', mimeType: 'image/png',
+                filePath: newSignaturePath, signerName: payload.signature.signerName,
+                signedAt: payload.signature.signedAt,
+              });
+            } else {
+              database.deleteInspectionSignature(payload.inspectionId);
+            }
+          }
           const report = supported.length ? await reportService.generate(payload.inspectionId, { recordFailure: false }) : null;
           database.commitSync();
+          transactionStarted = false;
+          if (payload.signature !== undefined && previousSignature?.file_path
+              && previousSignature.file_path !== newSignaturePath
+              && isInsideDirectory(previousSignature.file_path, signaturesDirectory)) {
+            try { fs.rmSync(previousSignature.file_path, { force: true }); }
+            catch (cleanupError) { console.error('[server] Previous signature cleanup failed:', cleanupError); }
+          }
           return { created, supported, report };
         } catch (error) {
-          database.rollbackSync();
+          if (transactionStarted) database.rollbackSync();
+          if (stagedSignaturePath) fs.rmSync(stagedSignaturePath, { force: true });
+          if (newSignaturePath && isInsideDirectory(newSignaturePath, signaturesDirectory)) {
+            fs.rmSync(newSignaturePath, { force: true });
+          }
           try { reportService.recordFailedAttempt(payload.inspectionId, error); } catch { /* new row was rolled back */ }
           throw error;
         }
@@ -199,6 +240,9 @@ export function createApp(
         lastAttemptAt: report.last_attempt_at,
         lastAttemptStatus: report.last_attempt_status,
         lastAttemptError: report.last_attempt_error,
+        signatureAvailable: report.signature_available === 1,
+        signatureSignerName: report.signature_signer_name,
+        signatureSignedAt: report.signature_signed_at,
         templateVersion: report.template_version,
         companyName: report.company_name,
         inspectionDate: report.inspection_date,
@@ -237,6 +281,10 @@ export function createApp(
   });
 
   app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+    if ((error as Error & { type?: string }).type === 'entity.too.large') {
+      response.status(413).json({ ok: false, message: 'Inspection payload is too large' });
+      return;
+    }
     console.error('[server] Request failed:', error);
     response.status(500).json({ ok: false, message: 'Local server error' });
   });

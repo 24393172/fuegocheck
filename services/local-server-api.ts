@@ -1,5 +1,7 @@
 import { ExtinguisherRecord } from '../types/extinguisher.types';
 import { HydrantRecord } from '../types/hydrant.types';
+import { File, Paths } from 'expo-file-system';
+import { fetch as expoFetch } from 'expo/fetch';
 
 const REQUEST_TIMEOUT_MS = 7000;
 
@@ -29,6 +31,12 @@ export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'ex
   selectedFormatIds: string[];
   extinguishers?: ExtinguisherRecord[];
   hydrants?: HydrantRecord[];
+  signature?: {
+    mimeType: 'image/png';
+    dataBase64: string;
+    signedAt: string;
+    signerName: string;
+  } | null;
 }
 
 type ExtinguisherServerRecord = Omit<
@@ -149,6 +157,48 @@ export async function requestLocalServer<T>(path: string, init?: RequestInit): P
       error instanceof Error ? error.message : 'Local server is unavailable',
       0,
       'NETWORK'
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function downloadOfficialReport(downloadUrl: string, reportId: string, inspectionId: string): Promise<string> {
+  const uuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+  const downloadMatch = new RegExp(`^/api/reports/(${uuidPattern})/download$`, 'i').exec(downloadUrl);
+  if (!downloadMatch || !new RegExp(`^${uuidPattern}$`, 'i').test(reportId)
+      || downloadMatch[1].toLowerCase() !== reportId.toLowerCase()) {
+    throw new LocalServerApiError('Invalid official report reference', 0, 'VALIDATION');
+  }
+  const shortInspectionId = inspectionId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8);
+  const target = new File(Paths.document, `reporte_oficial_${shortInspectionId}_${reportId}.xlsx`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await expoFetch(`${getLocalServerUrl()}${downloadUrl}`, {
+      headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new LocalServerApiError(`No se pudo descargar el reporte oficial (HTTP ${response.status})`, response.status, 'SERVER');
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length < 1000 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+      throw new LocalServerApiError('El servidor devolvió un archivo de reporte inválido', 0, 'SERVER');
+    }
+    if (target.exists) target.delete();
+    target.create({ overwrite: true });
+    target.write(bytes);
+    if (!target.exists || !target.size) throw new LocalServerApiError('El reporte descargado está vacío', 0, 'SERVER');
+    return target.uri;
+  } catch (error) {
+    if (target.exists) target.delete();
+    if (error instanceof LocalServerApiError) throw error;
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new LocalServerApiError('La descarga del reporte oficial agotó el tiempo de espera', 0, 'TIMEOUT');
+    }
+    throw new LocalServerApiError(
+      error instanceof Error ? error.message : 'No se pudo descargar el reporte oficial', 0, 'NETWORK'
     );
   } finally {
     clearTimeout(timeout);

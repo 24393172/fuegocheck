@@ -65,7 +65,7 @@ export default function ExtinguisherEditorScreen() {
           router.back();
           return;
         }
-        const locked = readonly === '1' || inspection.status === 'completed' || inspection.status === 'sent';
+        const locked = readonly === '1' || inspection.status === 'completed' || inspection.status === 'mail_composer_opened' || inspection.status === 'sent';
         setIsReadOnly(locked);
         readOnlyRef.current = locked;
 

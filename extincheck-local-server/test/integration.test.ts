@@ -13,6 +13,11 @@ import { ExtinguisherReportService, SHEET_CLEANUP_CONFIG } from '../src/report-g
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
 const templatePath = path.join(serverRoot, 'templates', 'FORMATOS P.R. CANCUN.xlsx');
+const signaturePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+function technicianSignature(signerName = 'Daniel Cocom', signedAt = '2026-07-22T18:00:00.000Z') {
+  return { mimeType: 'image/png' as const, dataBase64: signaturePngBase64, signedAt, signerName };
+}
 
 function fileHash(filePath: string): string {
   return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -596,12 +601,16 @@ test('legacy selected formats migrate from existing child rows without data loss
 
 test('a failed regeneration preserves the previous valid report and exposes a warning', async (context) => {
   const { database, adminRepository, baseUrl } = await testServer(context);
-  const inspection = { ...payload('inspection-preserve-report'), selectedFormatIds: ['extintores'] };
+  const inspection = {
+    ...payload('inspection-preserve-report'), selectedFormatIds: ['extintores'],
+    signature: technicianSignature('Firma original'),
+  };
   const generated = await fetch(`${baseUrl}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
   });
   assert.equal(generated.status, 201);
   const generatedBody = await generated.json() as { report: { id: string; downloadUrl: string } };
+  const originalSignature = database.getInspectionSignature(inspection.inspectionId)!;
 
   const brokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-preserve-error-'));
   const brokenService = new ExtinguisherReportService(database, path.join(brokenDirectory, 'missing.xlsx'), path.join(brokenDirectory, 'reports'));
@@ -612,7 +621,10 @@ test('a failed regeneration preserves the previous valid report and exposes a wa
   assert.ok(address && typeof address === 'object');
   const failed = await fetch(`http://127.0.0.1:${address.port}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...inspection, syncVersion: 101 }),
+    body: JSON.stringify({
+      ...inspection, syncVersion: 101,
+      signature: technicianSignature('Firma que debe revertirse', '2026-07-22T20:00:00.000Z'),
+    }),
   });
   assert.equal(failed.status, 500);
 
@@ -626,4 +638,99 @@ test('a failed regeneration preserves the previous valid report and exposes a wa
   };
   assert.equal(reportList.reports[0].lastAttemptStatus, 'error');
   assert.ok(reportList.reports[0].downloadUrl);
+  assert.equal(database.getInspectionSignature(inspection.inspectionId)?.file_path, originalSignature.file_path);
+  assert.equal(database.getInspectionSignature(inspection.inspectionId)?.signer_name, 'Firma original');
+  assert.equal(fs.existsSync(originalSignature.file_path), true);
+});
+
+test('atomic sync stores a valid technician signature and embeds one image in FIRMAS', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspection = {
+    ...payload('inspection-signature-valid'), selectedFormatIds: ['extintores'],
+    signature: technicianSignature(),
+  };
+  const templateHash = fileHash(templatePath);
+  const response = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { report: { id: string } };
+  assert.equal(database.signatureCount(inspection.inspectionId), 1);
+  const stored = database.getInspectionSignature(inspection.inspectionId);
+  assert.ok(stored && fs.existsSync(stored.file_path));
+  assert.equal(stored.signer_name, 'Daniel Cocom');
+
+  const report = database.getReport(body.report.id);
+  assert.ok(report);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.file_path);
+  const signaturesSheet = workbook.getWorksheet('FIRMAS');
+  assert.ok(signaturesSheet);
+  assert.equal(signaturesSheet.getCell('I30').value, 'Daniel Cocom');
+  assert.equal(signaturesSheet.getImages().length, 1);
+  assert.equal(workbook.getWorksheet('EXTINTORES')?.getImages().length, 1, 'Template logo must remain');
+  assert.equal(fileHash(templatePath), templateHash);
+
+  const listed = await (await fetch(`${baseUrl}/api/reports`)).json() as {
+    reports: Array<{ signatureAvailable: boolean; signatureSignerName: string; signatureSignedAt: string }>;
+  };
+  assert.equal(listed.reports[0].signatureAvailable, true);
+  assert.equal(listed.reports[0].signatureSignerName, 'Daniel Cocom');
+  assert.equal(listed.reports[0].signatureSignedAt, inspection.signature.signedAt);
+});
+
+test('resynchronizing replaces the technician signature without duplicate rows or images', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-signature-replace';
+  const firstPayload = { ...payload(inspectionId), selectedFormatIds: ['extintores'], signature: technicianSignature() };
+  assert.equal((await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(firstPayload),
+  })).status, 201);
+  const firstSignature = database.getInspectionSignature(inspectionId)!;
+  const secondPayload = {
+    ...firstPayload, syncVersion: 2,
+    signature: technicianSignature('Daniel Cocom actualizado', '2026-07-22T19:00:00.000Z'),
+  };
+  const second = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(secondPayload),
+  });
+  assert.equal(second.status, 200);
+  assert.equal(database.signatureCount(inspectionId), 1);
+  const current = database.getInspectionSignature(inspectionId)!;
+  assert.notEqual(current.file_path, firstSignature.file_path);
+  assert.equal(fs.existsSync(firstSignature.file_path), false);
+  assert.equal(fs.existsSync(current.file_path), true);
+  const report = database.listReports().find((item) => item.inspection_id === inspectionId)!;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.file_path);
+  assert.equal(workbook.getWorksheet('FIRMAS')?.getImages().length, 1);
+  assert.equal(workbook.getWorksheet('FIRMAS')?.getCell('I30').value, 'Daniel Cocom actualizado');
+});
+
+test('invalid or oversized signatures are rejected before changing inspection data', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-signature-invalid';
+  const valid = { ...payload(inspectionId), selectedFormatIds: ['extintores'], signature: technicianSignature() };
+  assert.equal((await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(valid),
+  })).status, 201);
+  const before = database.getInspectionSignature(inspectionId)!;
+  const invalidMime = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...valid, syncVersion: 2, signature: { ...valid.signature, mimeType: 'image/jpeg' } }),
+  });
+  assert.equal(invalidMime.status, 400);
+  const oversized = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...valid, syncVersion: 3, signature: { ...valid.signature, dataBase64: 'A'.repeat(1_500_000) } }),
+  });
+  assert.equal(oversized.status, 400);
+  const oversizedRequest = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...valid, syncVersion: 4, signature: { ...valid.signature, dataBase64: 'A'.repeat(2_100_000) } }),
+  });
+  assert.equal(oversizedRequest.status, 413);
+  assert.equal(database.signatureCount(inspectionId), 1);
+  assert.equal(database.getInspectionSignature(inspectionId)?.file_path, before.file_path);
+  assert.equal(database.getInspectionReportData(inspectionId)?.inspection.selectedFormatIds.join(','), 'extintores');
 });

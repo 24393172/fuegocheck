@@ -9,6 +9,7 @@ const STATUS_CONFIG: Record<InspectionStatus, { label: string; bg: string; text:
   draft: { label: 'Borrador', bg: '#f3f4f6', text: '#374151' },
   pending: { label: 'Pendiente', bg: '#ffedd5', text: '#9a3412' },
   completed: { label: 'Por enviar', bg: '#fef3c7', text: '#b45309' },
+  mail_composer_opened: { label: 'Correo abierto', bg: '#dbeafe', text: '#1d4ed8' },
   sent: { label: 'Enviada', bg: '#dcfce7', text: '#15803d' },
 };
 

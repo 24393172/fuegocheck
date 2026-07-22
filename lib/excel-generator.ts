@@ -11,6 +11,9 @@ import { InspectionStatus } from '../types/inspection.types';
 import { parseFormData, getSiteData } from './form-data';
 import { normalizeSelectedFormatIds, schemasForSelectedFormatIds } from './inspection-formats';
 
+// LEGACY EXPORT ONLY: this workbook is not the official server report. It is
+// retained for the Settings master export and unsynchronized legacy records.
+
 // Short, Excel-safe sheet names (max 31 chars, no : \ / ? * [ ]).
 const SHEET_NAME: Record<string, string> = {
   jockey: 'Jockey',
@@ -36,6 +39,7 @@ const STATUS_LABEL: Record<InspectionStatus, string> = {
   draft: 'Borrador',
   pending: 'Pendiente',
   completed: 'Por enviar',
+  mail_composer_opened: 'Correo abierto',
   sent: 'Enviada',
 };
 
@@ -64,6 +68,7 @@ function writeWorkbook(
 
 // True if a pump has at least one answered/filled field (so it goes in the report).
 function pumpHasData(schema: FormSchema, data: Record<string, unknown>): boolean {
+  if (Array.isArray(data.items)) return data.items.length > 0;
   for (const section of schema.sections) {
     for (const field of section.fields) {
       const v = data[field.key];
@@ -71,6 +76,27 @@ function pumpHasData(schema: FormSchema, data: Record<string, unknown>): boolean
     }
   }
   return false;
+}
+
+function collectionItems(data: Record<string, unknown>): Record<string, unknown>[] {
+  return Array.isArray(data.items)
+    ? data.items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    : [];
+}
+
+function buildCollectionSheet(
+  schema: FormSchema,
+  site: ReturnType<typeof getSiteData>,
+  items: Record<string, unknown>[]
+): (string | number)[][] {
+  const fields = schema.sections.flatMap((section) => section.fields)
+    .filter((field) => field.type !== 'photo' && field.type !== 'signature');
+  return [
+    ['Fuego & Seguridad'], [schema.name],
+    [`Cliente: ${site.cliente}`], [`Fecha: ${site.fecha}`], [],
+    fields.map((field) => field.label),
+    ...items.map((item) => fields.map((field) => cellValue(field.type, item[field.key]))),
+  ];
 }
 
 // Builds the "Lecturas" column text for a question that has readings attached,
@@ -200,7 +226,10 @@ export async function generateInspectionExcel(inspectionId: string): Promise<str
   for (const schema of reportSchemas) {
     const data = pumps[schema.id] ?? {};
     if (!pumpHasData(schema, data)) continue;
-    const ws = XLSX.utils.aoa_to_sheet(buildPumpSheet(schema, site, data));
+    const items = collectionItems(data);
+    const ws = XLSX.utils.aoa_to_sheet(items.length
+      ? buildCollectionSheet(schema, site, items)
+      : buildPumpSheet(schema, site, data));
     ws['!cols'] = PUMP_SHEET_COLS;
     XLSX.utils.book_append_sheet(wb, ws, SHEET_NAME[schema.id] ?? schema.id);
     added++;
@@ -250,12 +279,15 @@ export async function generateMasterExcel(): Promise<{ filePath: string; count: 
       if (!data || !pumpHasData(schema, data)) continue;
 
       const site = getSiteData(insp);
-      const row: (string | number)[] = [
-        site.fecha, site.cliente, site.atencion, site.area, site.tecnico,
-        STATUS_LABEL[insp.status] ?? insp.status,
-      ];
-      for (const field of fieldCols) row.push(cellValue(field.type, data[field.key]));
-      rows.push(row);
+      const itemRows = collectionItems(data);
+      for (const source of itemRows.length ? itemRows : [data]) {
+        const row: (string | number)[] = [
+          site.fecha, site.cliente, site.atencion, site.area, site.tecnico,
+          STATUS_LABEL[insp.status] ?? insp.status,
+        ];
+        for (const field of fieldCols) row.push(cellValue(field.type, source[field.key]));
+        rows.push(row);
+      }
     }
 
     const ws = XLSX.utils.aoa_to_sheet(rows);

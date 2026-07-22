@@ -1,73 +1,33 @@
 import { useEffect, useState } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-  Alert,
-  ScrollView,
+  ActivityIndicator, Alert, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as MailComposer from 'expo-mail-composer';
-import * as FileSystem from 'expo-file-system/legacy';
-import {
-  getInspection,
-  updateStatus,
-  deleteInspectionCompletely,
-} from '../../../lib/repositories/inspections.repo';
+import * as Sharing from 'expo-sharing';
+import { deleteInspectionCompletely, getInspection, updateStatus } from '../../../lib/repositories/inspections.repo';
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
-import { generateInspectionExcel } from '../../../lib/excel-generator';
 import { inspectionDate } from '../../../lib/form-data';
 import { loadSettings } from '../../../lib/settings-manager';
+import { checkServerHealth, downloadOfficialReport, LocalServerApiError } from '../../../services/local-server-api';
 import { Inspection, Photo, Signature } from '../../../types/inspection.types';
 import StatusBadge from '../../../components/ui/StatusBadge';
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Saves a base64 signature string to a local PNG file. Returns the file path. */
-async function saveSignatureFile(base64: string, fileName: string): Promise<string> {
-  const clean = base64.replace(/^data:image\/\w+;base64,/, '');
-  const path = `${FileSystem.documentDirectory}${fileName}`;
-  await FileSystem.writeAsStringAsync(path, clean, {
-    encoding: FileSystem.EncodingType.Base64,
-  });
-  return path;
-}
-
-// Plain text only: Android mail apps (Gmail) ignore HTML bodies from intents,
-// so the full report travels in the attached Excel — the body is just a summary.
-function buildEmailBody(
-  inspection: Inspection,
-  photoCount: number,
-  hasSignature: boolean
-): string {
-  const attachmentParts = ['el reporte en Excel'];
-  if (photoCount > 0) attachmentParts.push(`${photoCount} foto(s) de evidencia`);
-  if (hasSignature) attachmentParts.push('la firma');
-
+function buildEmailBody(inspection: Inspection, photoCount: number): string {
+  const attachments = ['el reporte oficial en Excel'];
+  if (photoCount) attachments.push(`${photoCount} foto(s) de evidencia`);
   return [
-    'Fuego & Seguridad',
-    'Reporte de inspección de bombas contra incendio',
-    '',
-    `Cliente: ${inspection.client_name}`,
-    `Fecha: ${inspectionDate(inspection)}`,
-    `Técnico: ${inspection.technician_name}`,
-    `Ubicación: ${inspection.location}`,
-    '',
-    `Se adjunta ${attachmentParts.join(', ')}.`,
-    '',
-    'Generado automáticamente — Fuego & Seguridad',
+    'Fuego & Seguridad', 'Reporte de inspección contra incendio', '',
+    `Cliente: ${inspection.client_name}`, `Fecha: ${inspectionDate(inspection)}`,
+    `Técnico: ${inspection.technician_name}`, `Ubicación: ${inspection.location}`, '',
+    `Se adjunta ${attachments.join(' y ')}.`, '', 'Generado por Fuego & Seguridad',
   ].join('\n');
 }
-
-// ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ShareScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-
   const [inspection, setInspection] = useState<Inspection | null>(null);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [signatures, setSignatures] = useState<Signature[]>([]);
@@ -77,320 +37,133 @@ export default function ShareScreen() {
 
   useEffect(() => {
     let cancelled = false;
-    async function load() {
-      try {
-        const [insp, ph, sig, settings] = await Promise.all([
-          getInspection(id),
-          getPhotosByInspection(id),
-          getSignaturesByInspection(id),
-          loadSettings(),
-        ]);
+    Promise.all([getInspection(id), getPhotosByInspection(id), getSignaturesByInspection(id), loadSettings()])
+      .then(([loadedInspection, loadedPhotos, loadedSignatures, settings]) => {
         if (cancelled) return;
-        if (!insp) {
-          Alert.alert('Error', 'No se encontró la inspección.');
-          router.back();
-          return;
-        }
-        setInspection(insp);
-        setPhotos(ph);
-        setSignatures(sig);
+        if (!loadedInspection) throw new Error('Inspection not found');
+        setInspection(loadedInspection); setPhotos(loadedPhotos); setSignatures(loadedSignatures);
         setRecipientEmail(settings.recipientEmail);
-      } catch (error) {
+      })
+      .catch((error) => {
         console.error('[share] Failed to load inspection:', error);
-        Alert.alert('Error', 'No se pudo cargar la inspección.');
-        router.back();
-      } finally {
-        if (!cancelled) setIsLoading(false);
-      }
-    }
-    load();
+        Alert.alert('Error', 'No se pudo cargar la inspección.'); router.back();
+      })
+      .finally(() => { if (!cancelled) setIsLoading(false); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [id, router]);
 
-  // Builds the Excel + signature files and opens the mail composer.
-  // IMPORTANT: the generated files are NOT deleted here — Gmail re-reads them
-  // in the background when the email is actually sent, so deleting them right
-  // after the composer closes makes the send fail and strands the email in
-  // drafts. They are cleaned up on inspection delete and by the startup
-  // routine in lib/attachment-files.ts.
+  function officialReportReference(): { id: string; downloadUrl: string } | null {
+    if (inspection?.sync_status === 'synced' && inspection.official_report_id
+        && inspection.official_report_download_url) {
+      return { id: inspection.official_report_id, downloadUrl: inspection.official_report_download_url };
+    }
+    Alert.alert(
+      'Sincronización requerida',
+      'Para compartir el reporte oficial, primero sincroniza la inspección con el servidor local.',
+      [{ text: 'Cancelar', style: 'cancel' }, { text: 'Volver a sincronizar', onPress: () => router.replace(`/inspection/${id}`) }]
+    );
+    return null;
+  }
+
+  async function downloadReport(): Promise<string | null> {
+    const report = officialReportReference();
+    if (!report) return null;
+    await checkServerHealth();
+    return downloadOfficialReport(report.downloadUrl, report.id, id);
+  }
+
   async function shareByEmail(): Promise<void> {
     if (!inspection) return;
-
-    const available = await MailComposer.isAvailableAsync();
-    if (!available) {
-      Alert.alert(
-        'No hay app de correo',
-        'Este dispositivo no tiene una app de correo configurada (Gmail, Outlook, etc.). Instala una y vuelve a intentarlo.'
-      );
+    if (!await MailComposer.isAvailableAsync()) {
+      Alert.alert('No hay app de correo', 'Configura Gmail, Outlook u otra aplicación de correo e inténtalo nuevamente.');
       return;
     }
-
     try {
       setIsSharing(true);
-
-      // 1. Generate Excel (deterministic name — re-sharing overwrites it)
-      const excelPath = await generateInspectionExcel(id);
-
-      // 2. Save signatures as PNG files so they can be attached
-      const sigPaths: string[] = [];
-      for (const sig of signatures) {
-        const path = await saveSignatureFile(
-          sig.image_base64,
-          `firma_${sig.signer_type}_${id.slice(0, 8)}.png`
-        );
-        sigPaths.push(path);
-      }
-
-      // 3. Attachments: Excel + photos + signatures (photos are NOT temp files)
-      const attachments = [excelPath, ...photos.map((p) => p.local_uri), ...sigPaths];
-
-      const subject = `[Inspección] ${inspection.client_name} - ${inspectionDate(inspection)} - ${inspection.technician_name}`;
-      const body = buildEmailBody(inspection, photos.length, signatures.length > 0);
-
-      // 4. Mark as sent before opening the composer. Android mail apps don't
-      // reliably report back whether the email was actually sent, so we mark it
-      // optimistically — the user can re-share from here if they cancel.
-      const previousStatus = inspection.status;
-      await updateStatus(id, 'sent');
-      setInspection({ ...inspection, status: 'sent' });
-
-      try {
-        await MailComposer.composeAsync({
-          recipients: [recipientEmail],
-          subject,
-          body,
-          attachments,
-        });
-      } catch (composeError) {
-        // The composer never opened — undo the optimistic 'sent' mark.
-        await updateStatus(id, previousStatus);
-        setInspection({ ...inspection, status: previousStatus });
-        throw composeError;
+      const excelPath = await downloadReport();
+      if (!excelPath) return;
+      const result = await MailComposer.composeAsync({
+        recipients: recipientEmail ? [recipientEmail] : [],
+        subject: `[Inspección] ${inspection.client_name} - ${inspectionDate(inspection)} - ${inspection.technician_name}`,
+        body: buildEmailBody(inspection, photos.length),
+        attachments: [excelPath, ...photos.map((photo) => photo.local_uri)],
+      });
+      if (Platform.OS === 'ios' && result.status === MailComposer.MailComposerStatus.SENT) {
+        await updateStatus(id, 'sent'); setInspection({ ...inspection, status: 'sent' });
+      } else if (result.status !== MailComposer.MailComposerStatus.CANCELLED) {
+        if (inspection.status !== 'sent') {
+          await updateStatus(id, 'mail_composer_opened');
+          setInspection({ ...inspection, status: 'mail_composer_opened' });
+        }
+        Alert.alert('Aplicación de correo abierta', 'Se abrió la aplicación de correo. ExtinCheck no puede confirmar si el mensaje fue enviado.');
       }
     } catch (error) {
-      console.error('[share] Failed to share inspection:', error);
-      Alert.alert('Error', 'No se pudo preparar el correo. Intenta de nuevo.');
-    } finally {
-      setIsSharing(false);
-    }
+      console.error('[share] Failed to open email:', error);
+      Alert.alert('Error', error instanceof LocalServerApiError ? error.message : 'No se pudo preparar el correo.');
+    } finally { setIsSharing(false); }
   }
 
-  function confirmShare(): void {
-    if (!inspection) return;
-    Alert.alert(
-      'Compartir por correo',
-      `Se abrirá tu app de correo con el Excel y las fotos adjuntas para enviar a:\n\n${recipientEmail}`,
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        { text: 'Continuar', onPress: () => { shareByEmail().catch(console.error); } },
-      ]
-    );
+  async function shareOfficialReport(): Promise<void> {
+    try {
+      setIsSharing(true);
+      if (!await Sharing.isAvailableAsync()) throw new Error('El menú para compartir no está disponible.');
+      const fileUri = await downloadReport();
+      if (!fileUri) return;
+      await Sharing.shareAsync(fileUri, {
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        UTI: 'org.openxmlformats.spreadsheetml.sheet', dialogTitle: 'Compartir reporte oficial',
+      });
+    } catch (error) {
+      console.error('[share] Failed to share official report:', error);
+      Alert.alert('Error', error instanceof Error ? error.message : 'No se pudo compartir el reporte oficial.');
+    } finally { setIsSharing(false); }
   }
 
-  function confirmDelete(): void {
-    Alert.alert(
-      'Eliminar inspección',
-      '¿Seguro que deseas eliminar esta inspección? Se borrarán sus fotos y firmas. Esta acción no se puede deshacer.',
-      [
-        { text: 'Cancelar', style: 'cancel' },
-        {
-          text: 'Eliminar',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteInspectionCompletely(id);
-              router.dismissAll();
-            } catch (error) {
-              console.error('[share] Failed to delete inspection:', error);
-              Alert.alert('Error', 'No se pudo eliminar la inspección.');
-            }
-          },
-        },
-      ]
-    );
+  function confirmDelete() {
+    Alert.alert('Eliminar inspección', '¿Seguro que deseas eliminar esta inspección? Esta acción no se puede deshacer.', [
+      { text: 'Cancelar', style: 'cancel' },
+      { text: 'Eliminar', style: 'destructive', onPress: async () => {
+        try { await deleteInspectionCompletely(id); router.dismissAll(); }
+        catch { Alert.alert('Error', 'No se pudo eliminar la inspección.'); }
+      } },
+    ]);
   }
 
-  if (isLoading || !inspection) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#1e3a5f" />
-      </View>
-    );
-  }
-
-  return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.clientName}>{inspection.client_name || 'Sin cliente'}</Text>
-          <StatusBadge status={inspection.status} />
-        </View>
-
-        <InfoRow label="Fecha" value={inspectionDate(inspection) || '—'} />
-        <InfoRow label="Técnico" value={inspection.technician_name || '—'} />
-        <InfoRow label="Ubicación" value={inspection.location || '—'} />
-        <InfoRow label="Fotos" value={String(photos.length)} />
-        <InfoRow label="Firma" value={signatures.length > 0 ? 'Sí' : 'No'} last />
-      </View>
-
-      {inspection.status === 'sent' && (
-        <Text style={styles.sentNote}>
-          Esta inspección ya fue compartida. Puedes volver a enviarla si lo necesitas.
-        </Text>
-      )}
-
-      <TouchableOpacity
-        style={[styles.shareButton, isSharing && styles.buttonDisabled]}
-        onPress={confirmShare}
-        disabled={isSharing}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.shareButtonText}>
-          {isSharing ? 'Preparando...' : inspection.status === 'sent' ? 'Volver a enviar por correo' : 'Compartir por correo'}
-        </Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        style={styles.editButton}
-        onPress={() => router.replace(`/inspection/${id}`)}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.editButtonText}>Editar inspección</Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity style={styles.backButton} onPress={() => router.dismissAll()} activeOpacity={0.8}>
-        <Text style={styles.backButtonText}>Volver al inicio</Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity style={styles.deleteButton} onPress={confirmDelete} activeOpacity={0.8}>
-        <Text style={styles.deleteButtonText}>Eliminar inspección</Text>
-      </TouchableOpacity>
-    </ScrollView>
-  );
+  if (isLoading || !inspection) return <View style={styles.centered}><ActivityIndicator size="large" color="#1e3a5f" /></View>;
+  return <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <View style={styles.card}><View style={styles.cardHeader}><Text style={styles.clientName}>{inspection.client_name || 'Sin cliente'}</Text><StatusBadge status={inspection.status} /></View>
+      <InfoRow label="Fecha" value={inspectionDate(inspection) || '—'} /><InfoRow label="Técnico" value={inspection.technician_name || '—'} />
+      <InfoRow label="Ubicación" value={inspection.location || '—'} /><InfoRow label="Fotos" value={String(photos.length)} />
+      <InfoRow label="Firma" value={signatures.length ? 'Sí' : 'No'} last /></View>
+    {inspection.status === 'sent' && <Text style={styles.sentNote}>El sistema confirmó el envío desde el compositor de correo.</Text>}
+    {inspection.status === 'mail_composer_opened' && <Text style={styles.openedNote}>Se abrió la aplicación de correo; el envío no pudo confirmarse.</Text>}
+    <TouchableOpacity style={[styles.primaryButton, isSharing && styles.disabled]} disabled={isSharing} onPress={() => { shareByEmail().catch(console.error); }}><Text style={styles.primaryText}>{isSharing ? 'Preparando…' : 'Abrir cliente de correo'}</Text></TouchableOpacity>
+    <TouchableOpacity style={[styles.outlineButton, isSharing && styles.disabled]} disabled={isSharing} onPress={() => { shareOfficialReport().catch(console.error); }}><Text style={styles.outlineText}>Compartir reporte oficial</Text></TouchableOpacity>
+    <TouchableOpacity style={styles.outlineButton} onPress={() => router.replace(`/inspection/${id}`)}><Text style={styles.outlineText}>Volver a la inspección</Text></TouchableOpacity>
+    <TouchableOpacity style={styles.backButton} onPress={() => router.dismissAll()}><Text style={styles.backText}>Volver al inicio</Text></TouchableOpacity>
+    <TouchableOpacity style={styles.deleteButton} onPress={confirmDelete}><Text style={styles.deleteText}>Eliminar inspección</Text></TouchableOpacity>
+  </ScrollView>;
 }
 
 function InfoRow({ label, value, last }: { label: string; value: string; last?: boolean }) {
-  return (
-    <View style={[styles.infoRow, last && { borderBottomWidth: 0 }]}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={styles.infoValue}>{value}</Text>
-    </View>
-  );
+  return <View style={[styles.infoRow, last && { borderBottomWidth: 0 }]}><Text style={styles.infoLabel}>{label}</Text><Text style={styles.infoValue}>{value}</Text></View>;
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f9fafb',
-  },
-  content: {
-    padding: 16,
-    gap: 12,
-  },
-  centered: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  card: {
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-    gap: 8,
-  },
-  clientName: {
-    flex: 1,
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#111827',
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f3f4f6',
-  },
-  infoLabel: {
-    fontSize: 14,
-    color: '#6b7280',
-  },
-  infoValue: {
-    fontSize: 14,
-    color: '#111827',
-    fontWeight: '500',
-    flexShrink: 1,
-    textAlign: 'right',
-    marginLeft: 12,
-  },
-  sentNote: {
-    fontSize: 13,
-    color: '#15803d',
-    backgroundColor: '#dcfce7',
-    padding: 12,
-    borderRadius: 8,
-    textAlign: 'center',
-  },
-  shareButton: {
-    backgroundColor: '#1e3a5f',
-    borderRadius: 10,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  shareButtonText: {
-    color: '#ffffff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  editButton: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#1e3a5f',
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  editButtonText: {
-    color: '#1e3a5f',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  backButton: {
-    backgroundColor: '#ffffff',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  backButtonText: {
-    color: '#374151',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  buttonDisabled: {
-    opacity: 0.6,
-  },
-  deleteButton: {
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  deleteButtonText: {
-    color: '#dc2626',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  container: { flex: 1, backgroundColor: '#f9fafb' }, content: { padding: 16, gap: 12 },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  card: { backgroundColor: '#fff', borderRadius: 12, padding: 16, elevation: 2 },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 },
+  clientName: { flex: 1, fontSize: 18, fontWeight: '700', color: '#111827' },
+  infoRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  infoLabel: { fontSize: 14, color: '#6b7280' }, infoValue: { fontSize: 14, color: '#111827', fontWeight: '500', flexShrink: 1, textAlign: 'right', marginLeft: 12 },
+  sentNote: { fontSize: 13, color: '#15803d', backgroundColor: '#dcfce7', padding: 12, borderRadius: 8, textAlign: 'center' },
+  openedNote: { fontSize: 13, color: '#1d4ed8', backgroundColor: '#dbeafe', padding: 12, borderRadius: 8, textAlign: 'center' },
+  primaryButton: { backgroundColor: '#1e3a5f', borderRadius: 10, paddingVertical: 16, alignItems: 'center' },
+  primaryText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  outlineButton: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#1e3a5f', borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
+  outlineText: { color: '#1e3a5f', fontSize: 15, fontWeight: '600' }, disabled: { opacity: 0.6 },
+  backButton: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#d1d5db', borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
+  backText: { color: '#374151', fontSize: 15, fontWeight: '600' },
+  deleteButton: { paddingVertical: 14, alignItems: 'center', marginTop: 8 }, deleteText: { color: '#dc2626', fontSize: 14, fontWeight: '600' },
 });

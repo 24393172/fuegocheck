@@ -7,7 +7,8 @@ import { deleteAttachmentFilesForInspection } from '../attachment-files';
 type CreateInspectionInput = Omit<
   Inspection,
   'id' | 'pinned' | 'created_at' | 'updated_at' | 'sent_at' |
-  'sync_status' | 'last_sync_attempt' | 'synced_at' | 'sync_error' | 'synced_format_ids'
+  'sync_status' | 'last_sync_attempt' | 'synced_at' | 'sync_error' | 'synced_format_ids' |
+  'official_report_id' | 'official_report_filename' | 'official_report_download_url'
 >;
 
 type InspectionRow = Omit<Inspection, 'pinned'> & { pinned: number };
@@ -45,6 +46,9 @@ export async function createInspection(input: CreateInspectionInput): Promise<In
     synced_at: null,
     sync_error: null,
     synced_format_ids: '[]',
+    official_report_id: null,
+    official_report_filename: null,
+    official_report_download_url: null,
   };
 
   await db.runAsync(
@@ -118,7 +122,9 @@ export async function getInspectionCounts(): Promise<Record<InspectionStatus, nu
     'SELECT status, COUNT(*) as count FROM inspections GROUP BY status',
     []
   );
-  const counts: Record<InspectionStatus, number> = { draft: 0, pending: 0, completed: 0, sent: 0 };
+  const counts: Record<InspectionStatus, number> = {
+    draft: 0, pending: 0, completed: 0, mail_composer_opened: 0, sent: 0,
+  };
   for (const row of rows) {
     if (row.status in counts) counts[row.status] = row.count;
   }
@@ -139,6 +145,9 @@ export async function updateInspection(
     updates.synced_at = null;
     updates.sync_error = null;
     updates.synced_format_ids = '[]';
+    updates.official_report_id = null;
+    updates.official_report_filename = null;
+    updates.official_report_download_url = null;
   }
   const columns = Object.keys(updates).map((k) => `${k} = ?`).join(', ');
   const values = [...Object.values(updates), id];
@@ -181,6 +190,18 @@ export async function updateSyncState(
     [status, now, status, now,
       status === 'error' || status === 'partial' ? errorMessage?.slice(0, 1000) ?? null : null,
       syncedFormatIds ? JSON.stringify(syncedFormatIds) : null, id]
+  );
+}
+
+export async function updateOfficialReport(
+  id: string,
+  report: { id: string; filename: string; downloadUrl: string } | null
+): Promise<void> {
+  const db = getDatabase();
+  await db.runAsync(
+    `UPDATE inspections SET official_report_id = ?, official_report_filename = ?,
+      official_report_download_url = ? WHERE id = ?`,
+    [report?.id ?? null, report?.filename ?? null, report?.downloadUrl ?? null, id]
   );
 }
 

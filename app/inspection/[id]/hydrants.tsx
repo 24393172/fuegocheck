@@ -59,7 +59,7 @@ export default function HydrantsScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const locked = readonly === '1' || inspection?.status === 'completed' || inspection?.status === 'sent';
+  const locked = readonly === '1' || inspection?.status === 'completed' || inspection?.status === 'mail_composer_opened' || inspection?.status === 'sent';
 
   function openEditor(itemId: string) {
     router.push(`/inspection/${id}/hydrant-editor?itemId=${itemId}${locked ? '&readonly=1' : ''}`);
