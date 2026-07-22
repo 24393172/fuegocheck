@@ -14,14 +14,12 @@ import { checkServerHealth, downloadOfficialReport, LocalServerApiError } from '
 import { Inspection, Photo, Signature } from '../../../types/inspection.types';
 import StatusBadge from '../../../components/ui/StatusBadge';
 
-function buildEmailBody(inspection: Inspection, photoCount: number): string {
-  const attachments = ['el reporte oficial en Excel'];
-  if (photoCount) attachments.push(`${photoCount} foto(s) de evidencia`);
+function buildEmailBody(inspection: Inspection): string {
   return [
     'Fuego & Seguridad', 'Reporte de inspección contra incendio', '',
     `Cliente: ${inspection.client_name}`, `Fecha: ${inspectionDate(inspection)}`,
     `Técnico: ${inspection.technician_name}`, `Ubicación: ${inspection.location}`, '',
-    `Se adjunta ${attachments.join(' y ')}.`, '', 'Generado por Fuego & Seguridad',
+    'Se adjunta el reporte oficial en Excel. Las evidencias están incluidas dentro del archivo.', '', 'Generado por Fuego & Seguridad',
   ].join('\n');
 }
 
@@ -85,8 +83,8 @@ export default function ShareScreen() {
       const result = await MailComposer.composeAsync({
         recipients: recipientEmail ? [recipientEmail] : [],
         subject: `[Inspección] ${inspection.client_name} - ${inspectionDate(inspection)} - ${inspection.technician_name}`,
-        body: buildEmailBody(inspection, photos.length),
-        attachments: [excelPath, ...photos.map((photo) => photo.local_uri)],
+        body: buildEmailBody(inspection),
+        attachments: [excelPath],
       });
       if (Platform.OS === 'ios' && result.status === MailComposer.MailComposerStatus.SENT) {
         await updateStatus(id, 'sent'); setInspection({ ...inspection, status: 'sent' });

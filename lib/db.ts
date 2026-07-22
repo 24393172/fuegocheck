@@ -51,7 +51,18 @@ export async function initializeDatabase(): Promise<void> {
       local_uri TEXT NOT NULL,
       thumbnail_uri TEXT,
       caption TEXT,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      format_type TEXT NOT NULL DEFAULT 'legacy',
+      item_id TEXT,
+      location_name_snapshot TEXT,
+      sync_status TEXT NOT NULL DEFAULT 'pending',
+      synced_at INTEGER,
+      last_sync_attempt INTEGER,
+      sync_error TEXT,
+      server_evidence_id TEXT,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      legacy INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS signatures (
@@ -143,6 +154,27 @@ export async function initializeDatabase(): Promise<void> {
   `);
 
   const inspectionColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(inspections)');
+  const photoColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(photos)');
+  const photoColumnNames = new Set(photoColumns.map((column) => column.name));
+  const hadEvidenceModel = photoColumnNames.has('format_type');
+  for (const [column, definition] of [
+    ['updated_at', 'INTEGER NOT NULL DEFAULT 0'], ['format_type', "TEXT NOT NULL DEFAULT 'legacy'"],
+    ['item_id', 'TEXT'], ['location_name_snapshot', 'TEXT'],
+    ['sync_status', "TEXT NOT NULL DEFAULT 'pending'"], ['synced_at', 'INTEGER'],
+    ['last_sync_attempt', 'INTEGER'], ['sync_error', 'TEXT'], ['server_evidence_id', 'TEXT'],
+    ['is_deleted', 'INTEGER NOT NULL DEFAULT 0'], ['legacy', 'INTEGER NOT NULL DEFAULT 0'],
+  ] as const) {
+    if (!photoColumnNames.has(column)) await database.execAsync(`ALTER TABLE photos ADD COLUMN ${column} ${definition};`);
+  }
+  if (!hadEvidenceModel) {
+    await database.execAsync(`UPDATE photos SET
+      updated_at = created_at,
+      format_type = CASE WHEN instr(field_key, ':') > 0 THEN substr(field_key, 1, instr(field_key, ':') - 1) ELSE 'legacy' END,
+      item_id = NULL,
+      location_name_snapshot = NULL,
+      sync_status = 'pending',
+      legacy = 1;`);
+  }
   if (!inspectionColumns.some((column) => column.name === 'pending_comment')) {
     await database.execAsync('ALTER TABLE inspections ADD COLUMN pending_comment TEXT;');
   }
@@ -178,6 +210,8 @@ export async function initializeDatabase(): Promise<void> {
   await database.execAsync(`
     CREATE INDEX IF NOT EXISTS idx_inspections_pinned_updated
     ON inspections(pinned DESC, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_photos_sync
+    ON photos(inspection_id, sync_status, is_deleted);
   `);
 
   const now = Date.now();
@@ -205,5 +239,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 6;');
+  await database.execAsync('PRAGMA user_version = 7;');
 }

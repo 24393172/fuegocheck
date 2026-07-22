@@ -1,6 +1,6 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { api, query } from './api';
-import { Branch, Company, EquipmentType, Location, Report } from './types';
+import { Branch, Company, EquipmentType, Evidence, Location, Report } from './types';
 
 type View = 'companies' | 'locations' | 'reports';
 type Notice = { kind: 'success' | 'error'; text: string } | null;
@@ -149,7 +149,13 @@ function ReportsView({ notify }: { notify: Notify }) {
 }
 
 function ReportStatus({ report }: { report: Report }) { return <div><span className={`report-status ${report.status}`}>{report.status === 'generated' ? 'Generado' : 'Error'}</span>{report.status === 'error' && <small className="error-detail">{report.errorMessage || 'No fue posible generar el archivo.'}</small>}{report.status === 'generated' && report.lastAttemptStatus === 'error' && <small className="error-detail">Última generación fallida. Se conserva el reporte válido anterior.</small>}</div>; }
-function SignatureStatus({ report }: { report: Report }) { return <div><strong>{report.signatureAvailable ? 'Sí' : 'No'}</strong>{report.signatureAvailable && <><small className="error-detail">{report.signatureSignerName || 'Técnico sin nombre'}</small><small className="error-detail">{report.signatureSignedAt ? displayDateTime(report.signatureSignedAt) : 'Fecha no disponible'}</small></>}</div>; }
+function SignatureStatus({ report }: { report: Report }) { return <div><strong>{report.signatureAvailable ? 'Sí' : 'No'}</strong>{report.signatureAvailable && <><small className="error-detail">{report.signatureSignerName || 'Técnico sin nombre'}</small><small className="error-detail">{report.signatureSignedAt ? displayDateTime(report.signatureSignedAt) : 'Fecha no disponible'}</small></>}<EvidenceSummary report={report} /></div>; }
+
+function EvidenceSummary({ report }: { report: Report }) {
+  const [open, setOpen] = useState(false); const [items, setItems] = useState<Evidence[]>([]); const [loading, setLoading] = useState(false); const [error, setError] = useState('');
+  async function show() { setOpen(true); setLoading(true); setError(''); try { const result = await api<{ evidence: Evidence[] }>(`/api/reports/${report.id}/evidence`); setItems(result.evidence); } catch (caught) { setError(message(caught)); } finally { setLoading(false); } }
+  return <><button className="evidence-link" onClick={() => void show()}>Evidencias: {report.evidenceCount}</button>{open && <Modal title={`Evidencias · ${report.companyName}`} onClose={() => setOpen(false)}>{loading ? <Loading /> : error ? <p className="form-error">{error}</p> : items.length === 0 ? <Empty text="Este reporte no tiene evidencias." /> : <div className="evidence-grid">{items.map((item) => <article key={item.id} className="evidence-card"><a href={item.fileUrl} target="_blank" rel="noreferrer"><img src={item.thumbnailUrl} alt={item.caption || 'Evidencia de inspección'} /></a><div><strong>{item.formatType === 'extintores' ? 'Extintores' : item.formatType === 'hidrantes' ? 'Hidrantes' : item.formatType}</strong><small>{item.equipmentLabel ? `Equipo ${item.equipmentLabel}` : 'Evidencia general'}</small><small>{item.locationNameSnapshot || 'Sin ubicación'}</small><p>{item.caption || 'Sin descripción'}</p><small>{displayDateTime(item.capturedAt)}</small><a className="evidence-open" href={item.fileUrl} target="_blank" rel="noreferrer">Abrir imagen</a></div></article>)}</div>}</Modal>}</>;
+}
 function Status({ active }: { active: boolean }) { return <span className={active ? 'status active' : 'status inactive'}><i />{active ? 'Activa' : 'Inactiva'}</span>; }
 function Loading() { return <div className="loading"><span /> Cargando información…</div>; }
 function Empty({ text }: { text: string }) { return <div className="empty">{text}</div>; }

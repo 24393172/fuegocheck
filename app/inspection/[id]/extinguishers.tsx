@@ -17,6 +17,8 @@ import {
 } from '../../../lib/extinguishers';
 import { parseFormData } from '../../../lib/form-data';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
+import { getPhotosForItem, requestPhotoDeletion } from '../../../lib/repositories/photos.repo';
+import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { ExtinguisherCollection, ExtinguisherRecord } from '../../../types/extinguisher.types';
 import { Inspection } from '../../../types/inspection.types';
 
@@ -107,6 +109,10 @@ export default function ExtinguishersScreen() {
                   pumps: { ...pumps, extintores: nextCollection },
                 }),
               });
+              for (const photo of await getPhotosForItem(id, 'extintores', item.id)) {
+                const outcome = await requestPhotoDeletion(photo);
+                if (outcome === 'deleted_local') await deletePhotoFiles(photo.local_uri, photo.thumbnail_uri);
+              }
               setCollection(nextCollection);
             } catch (error) {
               console.error('[extinguishers] Failed to delete:', error);

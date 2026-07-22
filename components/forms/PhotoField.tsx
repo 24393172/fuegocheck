@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { savePhoto, deletePhotoFiles } from '../../lib/photo-manager';
-import { addPhoto, deletePhoto as deletePhotoRecord } from '../../lib/repositories/photos.repo';
+import { addPhoto, requestPhotoDeletion } from '../../lib/repositories/photos.repo';
 import { generateId } from '../../lib/uuid';
 import { Photo } from '../../types/inspection.types';
 
@@ -53,25 +53,37 @@ export default function PhotoField({
 
     if (result.canceled || !result.assets[0]) return;
 
+    let savedFiles: Awaited<ReturnType<typeof savePhoto>> | null = null;
     try {
       setIsCapturing(true);
       const photoId = generateId();
-      const { localUri, thumbnailUri } = await savePhoto(
+      const asset = result.assets[0];
+      savedFiles = await savePhoto(
         inspectionId,
-        result.assets[0].uri,
-        photoId
+        asset.uri,
+        photoId,
+        asset.width,
+        asset.height
       );
+      const { localUri, thumbnailUri } = savedFiles;
 
       const saved = await addPhoto({
+        id: photoId,
         inspection_id: inspectionId,
         field_key: fieldKey,
         local_uri: localUri,
         thumbnail_uri: thumbnailUri,
         caption: null,
+        format_type: fieldKey.includes(':') ? fieldKey.split(':')[0] : 'legacy',
+        item_id: null,
+        location_name_snapshot: null,
+        legacy: !fieldKey.includes(':'),
       });
+      savedFiles = null;
 
       onPhotoSaved(saved);
     } catch (error) {
+      if (savedFiles) await deletePhotoFiles(savedFiles.localUri, savedFiles.thumbnailUri).catch(() => {});
       console.error('[PhotoField] Failed to save photo:', error);
       Alert.alert('Error', 'No se pudo guardar la foto. Intenta de nuevo.');
     } finally {
@@ -88,10 +100,8 @@ export default function PhotoField({
         style: 'destructive',
         onPress: async () => {
           try {
-            await Promise.all([
-              deletePhotoRecord(photo.id),
-              deletePhotoFiles(photo.local_uri, photo.thumbnail_uri),
-            ]);
+            const outcome = await requestPhotoDeletion(photo);
+            if (outcome === 'deleted_local') await deletePhotoFiles(photo.local_uri, photo.thumbnail_uri);
             onPhotoDeleted();
           } catch (error) {
             console.error('[PhotoField] Failed to delete photo:', error);

@@ -170,6 +170,25 @@ export const inspectionFormatIdSchema = z.enum([
   'extintores', 'ansul_r102',
 ]);
 
+export const evidenceMetadataSchema = z.object({
+  evidenceId: z.string().uuid(),
+  formatType: z.union([inspectionFormatIdSchema, z.literal('legacy')]),
+  itemId: id.nullable(),
+  fieldKey: z.string().trim().min(1).max(200),
+  caption: mediumText.nullable(),
+  locationNameSnapshot: mediumText.nullable(),
+  capturedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+}).strict();
+
+export const evidenceFinalizeSchema = z.object({
+  evidenceIds: z.array(z.string().uuid()).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.evidenceIds).size !== value.evidenceIds.length) {
+    context.addIssue({ code: 'custom', path: ['evidenceIds'], message: 'Duplicate evidence id' });
+  }
+});
+
 const commonInspectionShape = {
   inspectionId: id,
   company: z.object({ id: id.nullish(), name: z.string().trim().min(1).max(200) }).strict(),
@@ -186,6 +205,7 @@ export const inspectionSyncSchema = z.object({
   extinguishers: z.array(extinguisherSchema).max(115).optional(),
   hydrants: z.array(hydrantSchema).max(38).optional(),
   signature: inspectionSignatureSchema.nullable().optional(),
+  evidenceManifest: z.array(evidenceMetadataSchema).max(100).optional(),
 }).strict().superRefine((payload, context) => {
   const selected = new Set(payload.selectedFormatIds);
   if (selected.size !== payload.selectedFormatIds.length) {
@@ -208,6 +228,12 @@ export const inspectionSyncSchema = z.object({
       recordIds.add(record.id);
     });
   }
+  payload.evidenceManifest?.forEach((evidence, index) => {
+    if (evidence.formatType !== 'legacy' && !selected.has(evidence.formatType)) context.addIssue({
+      code: 'custom', path: ['evidenceManifest', index, 'formatType'],
+      message: 'Evidence format is not selected for this inspection',
+    });
+  });
 });
 
 export type InspectionSyncPayload = z.infer<typeof inspectionSyncSchema>;

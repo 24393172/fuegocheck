@@ -45,8 +45,24 @@ export interface Report {
   signatureAvailable: boolean;
   signatureSignerName: string | null;
   signatureSignedAt: string | null;
+  evidenceCount: number;
   templateVersion: string;
   companyName: string;
   inspectionDate: string;
   downloadUrl: string | null;
+}
+
+export interface Evidence {
+  id: string;
+  formatType: string;
+  itemId: string | null;
+  equipmentLabel: string | null;
+  fieldKey: string;
+  caption: string | null;
+  locationNameSnapshot: string | null;
+  capturedAt: string;
+  width: number;
+  height: number;
+  fileUrl: string;
+  thumbnailUrl: string;
 }

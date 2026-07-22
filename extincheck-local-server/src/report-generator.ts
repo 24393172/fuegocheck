@@ -5,7 +5,7 @@ import JSZip from 'jszip';
 import { GeneratedReport, InspectionReportData, LocalDatabase } from './database.js';
 
 const FORMAT_TYPE = 'inspection';
-const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-signature-v3';
+const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-evidence-v4';
 
 const EXTINGUISHER_RANGE = { firstRow: 14, lastRow: 128, firstColumn: 1, lastColumn: 35 };
 const HYDRANT_RANGE = { firstRow: 13, lastRow: 50, firstColumn: 1, lastColumn: 35 };
@@ -356,6 +356,102 @@ async function addSignaturesWorksheet(zip: JSZip, data: InspectionReportData): P
   }
 }
 
+async function addEvidenceWorksheet(zip: JSZip, data: InspectionReportData): Promise<void> {
+  const workbookFile = zip.file('xl/workbook.xml');
+  const relationshipsFile = zip.file('xl/_rels/workbook.xml.rels');
+  const contentTypesFile = zip.file('[Content_Types].xml');
+  if (!workbookFile || !relationshipsFile || !contentTypesFile) throw new Error('Invalid workbook package');
+  let workbookXml = await workbookFile.async('string');
+  let relationshipsXml = await relationshipsFile.async('string');
+  let contentTypesXml = await contentTypesFile.async('string');
+  const sheetNumber = Math.max(0, ...Object.keys(zip.files).map((name) =>
+    Number(/^xl\/worksheets\/sheet(\d+)\.xml$/.exec(name)?.[1] ?? 0))) + 1;
+  const drawingNumber = Math.max(0, ...Object.keys(zip.files).map((name) =>
+    Number(/^xl\/drawings\/drawing(\d+)\.xml$/.exec(name)?.[1] ?? 0))) + 1;
+  const relationshipId = Math.max(0, ...[...relationshipsXml.matchAll(/\bId="rId(\d+)"/g)]
+    .map((match) => Number(match[1]))) + 1;
+  const sheetId = Math.max(0, ...[...workbookXml.matchAll(/\bsheetId="(\d+)"/g)]
+    .map((match) => Number(match[1]))) + 1;
+
+  const rowCells = new Map<number, string[]>();
+  const addCells = (row: number, ...cells: string[]) => rowCells.set(row, [...(rowCells.get(row) ?? []), ...cells]);
+  addCells(2, inlineCell('A2', 'EVIDENCIAS FOTOGRÁFICAS', 77));
+  addCells(4, inlineCell('A4', 'CLIENTE:', 71), inlineCell('I4', data.inspection.companyName, 73));
+  addCells(5, inlineCell('A5', 'INSPECCIÓN:', 71), inlineCell('I5', data.inspection.id, 73));
+  addCells(6, inlineCell('A6', 'FECHA:', 71), inlineCell('I6', data.inspection.inspectionDate, 73));
+  const merges = ['A2:AI2', 'A4:H4', 'I4:AI4', 'A5:H5', 'I5:AI5', 'A6:H6', 'I6:AI6'];
+  const drawings: string[] = [];
+  const drawingRelationships: string[] = [];
+  const rowBreaks: number[] = [];
+  if (!data.evidence.length) {
+    addCells(10, inlineCell('A10', 'Sin evidencias fotográficas registradas.', 73));
+    merges.push('A10:AI10');
+  }
+  data.evidence.forEach((evidence, index) => {
+    if (!fs.existsSync(evidence.file_path)) throw new Error(`Evidence file was not found: ${evidence.id}`);
+    const pair = Math.floor(index / 2);
+    const left = index % 2 === 0;
+    const startRow = 9 + pair * 19;
+    const firstColumn = left ? 1 : 19;
+    const labelCell = `${left ? 'A' : 'S'}${startRow}`;
+    const valueCell = `${left ? 'E' : 'W'}${startRow}`;
+    const format = evidence.format_type === 'extintores' ? 'EXTINTORES'
+      : evidence.format_type === 'hidrantes' ? 'HIDRANTES' : evidence.format_type.toUpperCase();
+    const equipment = evidence.item_id
+      ? (evidence.format_type === 'extintores' ? data.extinguishers.find((item) => item.id === evidence.item_id)?.numero
+        : evidence.format_type === 'hidrantes' ? data.hydrants.find((item) => item.id === evidence.item_id)?.numero : null)
+        ?? evidence.item_id : 'General';
+    const description = evidence.caption || 'Sin descripción';
+    addCells(startRow, inlineCell(labelCell, format, 77), inlineCell(valueCell, `Equipo: ${equipment}`, 73));
+    addCells(startRow + 1, inlineCell(labelCell.replace(/\d+$/, String(startRow + 1)), `Ubicación: ${evidence.location_name_snapshot || 'Sin ubicación'}`, 73));
+    addCells(startRow + 2, inlineCell(labelCell.replace(/\d+$/, String(startRow + 2)), description, 73));
+    merges.push(`${left ? 'A' : 'S'}${startRow}:${left ? 'D' : 'V'}${startRow}`);
+    merges.push(`${left ? 'E' : 'W'}${startRow}:${left ? 'Q' : 'AI'}${startRow}`);
+    merges.push(`${left ? 'A' : 'S'}${startRow + 1}:${left ? 'Q' : 'AI'}${startRow + 1}`);
+    merges.push(`${left ? 'A' : 'S'}${startRow + 2}:${left ? 'Q' : 'AI'}${startRow + 2}`);
+    const extension = evidence.mime_type === 'image/png' ? 'png' : 'jpg';
+    const imageName = `evidence${sheetNumber}-${index + 1}.${extension}`;
+    zip.file(`xl/media/${imageName}`, fs.readFileSync(evidence.file_path));
+    const maxWidth = 3_400_000;
+    const maxHeight = 1_500_000;
+    const scale = Math.min(maxWidth / evidence.width, maxHeight / evidence.height);
+    const width = Math.round(evidence.width * scale);
+    const height = Math.round(evidence.height * scale);
+    const relId = `rId${index + 1}`;
+    drawings.push(`<xdr:oneCellAnchor><xdr:from><xdr:col>${firstColumn}</xdr:col><xdr:colOff>${Math.round((maxWidth - width) / 2)}</xdr:colOff><xdr:row>${startRow + 2}</xdr:row><xdr:rowOff>${Math.round((maxHeight - height) / 2)}</xdr:rowOff></xdr:from><xdr:ext cx="${width}" cy="${height}"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${index * 2 + 1}" name="Evidencia ${xmlEscape(evidence.id)}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${width}" cy="${height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>`);
+    drawings.push(`<xdr:twoCellAnchor><xdr:from><xdr:col>${firstColumn}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${startRow + 2}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>${firstColumn + 15}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${startRow + 16}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="${index * 2 + 2}" name="Marco evidencia"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="CBD5E1"/></a:solidFill></a:ln></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>`);
+    drawingRelationships.push(`<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${imageName}"/>`);
+    if (left && pair > 0) rowBreaks.push(startRow - 1);
+  });
+  const lastRow = Math.max(12, 9 + Math.ceil(data.evidence.length / 2) * 19);
+  const breaksXml = rowBreaks.length ? `<rowBreaks count="${rowBreaks.length}" manualBreakCount="${rowBreaks.length}">${rowBreaks.map((row) => `<brk id="${row}" max="16383" man="1"/>`).join('')}</rowBreaks>` : '';
+  const rowsXml = [...rowCells.entries()].sort(([left], [right]) => left - right)
+    .map(([row, cells]) => `<row r="${row}"${row === 2 || (!data.evidence.length && row === 10) ? ' ht="28" customHeight="1"' : ''}>${cells.join('')}</row>`).join('');
+  const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><pageSetUpPr fitToPage="1"/></sheetPr><dimension ref="A1:AI${lastRow}"/><sheetViews><sheetView workbookViewId="0" showGridLines="0"/></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="35" width="3" customWidth="1"/></cols><sheetData>${rowsXml}</sheetData><mergeCells count="${merges.length}">${merges.map((range) => `<mergeCell ref="${range}"/>`).join('')}</mergeCells><pageMargins left="0.25" right="0.25" top="0.3" bottom="0.3" header="0" footer="0"/><pageSetup orientation="landscape" paperSize="1" fitToWidth="1" fitToHeight="0"/>${breaksXml}<drawing r:id="rId1"/></worksheet>`;
+  zip.file(`xl/worksheets/sheet${sheetNumber}.xml`, sheetXml);
+  zip.file(`xl/worksheets/_rels/sheet${sheetNumber}.xml.rels`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing${drawingNumber}.xml"/></Relationships>`);
+  zip.file(`xl/drawings/drawing${drawingNumber}.xml`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">${drawings.join('')}</xdr:wsDr>`);
+  if (drawingRelationships.length) zip.file(`xl/drawings/_rels/drawing${drawingNumber}.xml.rels`, `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${drawingRelationships.join('')}</Relationships>`);
+  workbookXml = workbookXml.replace('</sheets>', `<sheet name="EVIDENCIAS" sheetId="${sheetId}" r:id="rId${relationshipId}"/></sheets>`);
+  relationshipsXml = relationshipsXml.replace('</Relationships>', `<Relationship Id="rId${relationshipId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetNumber}.xml"/></Relationships>`);
+  contentTypesXml = contentTypesXml.replace('</Types>', `<Override PartName="/xl/worksheets/sheet${sheetNumber}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing${drawingNumber}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`);
+  if (!contentTypesXml.includes('Extension="jpg"')) contentTypesXml = contentTypesXml.replace('</Types>', '<Default Extension="jpg" ContentType="image/jpeg"/></Types>');
+  zip.file('xl/workbook.xml', workbookXml);
+  zip.file('xl/_rels/workbook.xml.rels', relationshipsXml);
+  zip.file('[Content_Types].xml', contentTypesXml);
+  const appFile = zip.file('docProps/app.xml');
+  if (appFile) {
+    let appXml = await appFile.async('string');
+    appXml = appXml.replace(/(<vt:lpstr>Hojas de cálculo<\/vt:lpstr><\/vt:variant><vt:variant><vt:i4>)11(<\/vt:i4>)/,
+      (_match, before: string, after: string) => `${before}12${after}`);
+    appXml = appXml.replace(/(<TitlesOfParts><vt:vector size=")17(" baseType="lpstr">)/,
+      (_match, before: string, after: string) => `${before}18${after}`);
+    appXml = appXml.replace('<vt:lpstr>FIRMAS</vt:lpstr>',
+      '<vt:lpstr>FIRMAS</vt:lpstr><vt:lpstr>EVIDENCIAS</vt:lpstr>');
+    zip.file('docProps/app.xml', appXml);
+  }
+}
+
 export class ExtinguisherReportService {
   constructor(
     private readonly database: LocalDatabase,
@@ -455,6 +551,7 @@ export class ExtinguisherReportService {
       cleanedSheets.set(hydPath, hydXml);
       for (const [sheetPath, sheetXml] of cleanedSheets) zip.file(sheetPath, sheetXml);
       await addSignaturesWorksheet(zip, data);
+      await addEvidenceWorksheet(zip, data);
       let sharedStringReferences = 0;
       for (const entryName of Object.keys(zip.files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name))) {
         const xml = cleanedSheets.get(entryName) ?? await zip.file(entryName)!.async('string');

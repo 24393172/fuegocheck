@@ -27,6 +27,7 @@ import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { ExtinguisherRecord } from '../../../types/extinguisher.types';
 import { CatalogLocation } from '../../../types/catalog.types';
 import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
+import EquipmentEvidenceField from '../../../components/forms/EquipmentEvidenceField';
 
 const extinguisherSchema = INSPECTION_SCHEMAS.find((schema) => schema.id === 'extintores');
 
@@ -357,6 +358,16 @@ export default function ExtinguisherEditorScreen() {
           ))}
         </View>
       ))}
+
+      <EquipmentEvidenceField
+        inspectionId={id}
+        formatType="extintores"
+        itemId={recordId}
+        locationNameSnapshot={watchedValues.locationNameSnapshot || watchedValues.ubicacion || ''}
+        readOnly={isReadOnly}
+        beforeCapture={() => queueSave(getValues())}
+        canCapture={hasAnyExtinguisherData(watchedValues)}
+      />
 
       <TouchableOpacity
         style={[styles.saveButton, isSaving && styles.disabledButton]}

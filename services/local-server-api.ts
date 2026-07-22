@@ -2,6 +2,7 @@ import { ExtinguisherRecord } from '../types/extinguisher.types';
 import { HydrantRecord } from '../types/hydrant.types';
 import { File, Paths } from 'expo-file-system';
 import { fetch as expoFetch } from 'expo/fetch';
+import { Photo } from '../types/inspection.types';
 
 const REQUEST_TIMEOUT_MS = 7000;
 
@@ -37,6 +38,10 @@ export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'ex
     signedAt: string;
     signerName: string;
   } | null;
+  evidenceManifest?: Array<{
+    evidenceId: string; formatType: string; itemId: string | null; fieldKey: string;
+    caption: string | null; locationNameSnapshot: string | null; capturedAt: string; updatedAt: string;
+  }>;
 }
 
 type ExtinguisherServerRecord = Omit<
@@ -60,12 +65,20 @@ export interface SyncResponse {
   syncedFormatIds?: string[];
   unsupportedFormatIds?: string[];
   syncStatus?: 'partial' | 'synced';
+  evidencePending?: number;
+  missingEvidenceIds?: string[];
   report: {
     id: string;
     filename: string;
     downloadUrl: string;
     generatedAt: string;
   } | null;
+}
+
+export interface EvidenceFinalizeResponse {
+  ok: true;
+  evidenceCount: number;
+  report: NonNullable<SyncResponse['report']>;
 }
 
 export function syncInspection(payload: InspectionSyncPayload): Promise<SyncResponse> {
@@ -78,6 +91,46 @@ export function syncInspection(payload: InspectionSyncPayload): Promise<SyncResp
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(serverPayload),
+  });
+}
+
+export async function uploadInspectionEvidence(photo: Photo): Promise<{ id: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const form = new FormData();
+    form.append('inspectionId', photo.inspection_id);
+    form.append('metadata', JSON.stringify({
+      evidenceId: photo.id, formatType: photo.format_type, itemId: photo.item_id,
+      fieldKey: photo.field_key, caption: photo.caption,
+      locationNameSnapshot: photo.location_name_snapshot,
+      capturedAt: new Date(photo.created_at).toISOString(), updatedAt: new Date(photo.updated_at).toISOString(),
+    }));
+    form.append('file', new File(photo.local_uri));
+    if (photo.thumbnail_uri) form.append('thumbnail', new File(photo.thumbnail_uri));
+    const response = await expoFetch(`${getLocalServerUrl()}/api/inspections/${encodeURIComponent(photo.inspection_id)}/evidence`, {
+      method: 'POST', body: form, signal: controller.signal,
+    });
+    const body = await response.json().catch(() => null) as { message?: string; evidence?: { id: string } } | null;
+    if (!response.ok || !body?.evidence?.id) throw new LocalServerApiError(
+      body?.message || `No se pudo subir la evidencia (HTTP ${response.status})`, response.status,
+      response.status >= 400 && response.status < 500 ? 'VALIDATION' : 'SERVER'
+    );
+    return body.evidence;
+  } catch (error) {
+    if (error instanceof LocalServerApiError) throw error;
+    if (error instanceof Error && error.name === 'AbortError') throw new LocalServerApiError('La carga de la evidencia agotó el tiempo de espera', 0, 'TIMEOUT');
+    throw new LocalServerApiError(error instanceof Error ? error.message : 'No se pudo subir la evidencia', 0, 'NETWORK');
+  } finally { clearTimeout(timeout); }
+}
+
+export function deleteInspectionEvidence(inspectionId: string, evidenceId: string): Promise<{ ok: true }> {
+  return requestLocalServer(`/api/inspections/${encodeURIComponent(inspectionId)}/evidence/${encodeURIComponent(evidenceId)}`, { method: 'DELETE' });
+}
+
+export function finalizeInspectionEvidence(inspectionId: string, evidenceIds: string[]): Promise<EvidenceFinalizeResponse> {
+  return requestLocalServer(`/api/inspections/${encodeURIComponent(inspectionId)}/evidence/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ evidenceIds }),
   });
 }
 

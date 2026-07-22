@@ -105,6 +105,33 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_inspection_signatures_inspection
       ON inspection_signatures(inspection_id);
 
+      CREATE TABLE IF NOT EXISTS inspection_evidence (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        format_type TEXT NOT NULL,
+        item_id TEXT,
+        field_key TEXT NOT NULL,
+        caption TEXT,
+        location_name_snapshot TEXT,
+        mime_type TEXT NOT NULL CHECK (mime_type IN ('image/jpeg', 'image/png')),
+        filename TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        thumbnail_path TEXT,
+        file_size INTEGER NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        checksum TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_evidence_inspection
+      ON inspection_evidence(inspection_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_evidence_checksum
+      ON inspection_evidence(inspection_id, checksum);
+
       CREATE TABLE IF NOT EXISTS generated_reports (
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
@@ -209,6 +236,69 @@ export class LocalDatabase {
   deleteInspectionSignature(inspectionId: string, signatureType = 'technician') {
     this.database.prepare('DELETE FROM inspection_signatures WHERE inspection_id = ? AND signature_type = ?')
       .run(inspectionId, signatureType);
+  }
+  inspectionExists(inspectionId: string): boolean {
+    return Boolean(this.database.prepare('SELECT 1 FROM inspections WHERE id = ?').get(inspectionId));
+  }
+  evidenceItemBelongs(inspectionId: string, formatType: string, itemId: string | null): boolean {
+    if (!itemId) return true;
+    if (formatType === 'extintores') {
+      return Boolean(this.database.prepare('SELECT 1 FROM extinguishers WHERE inspection_id = ? AND id = ?')
+        .get(inspectionId, itemId));
+    }
+    if (formatType === 'hidrantes') {
+      return Boolean(this.database.prepare('SELECT 1 FROM hydrants WHERE inspection_id = ? AND id = ?')
+        .get(inspectionId, itemId));
+    }
+    return false;
+  }
+  getEvidence(id: string): InspectionEvidence | undefined {
+    return this.database.prepare(`SELECT id, inspection_id, format_type, item_id, field_key, caption,
+      location_name_snapshot, mime_type, filename, file_path, thumbnail_path, file_size,
+      width, height, checksum, captured_at, created_at, updated_at
+      FROM inspection_evidence WHERE id = ?`).get(id) as InspectionEvidence | undefined;
+  }
+  getEvidenceByChecksum(inspectionId: string, checksum: string): InspectionEvidence | undefined {
+    return this.database.prepare('SELECT * FROM inspection_evidence WHERE inspection_id = ? AND checksum = ?')
+      .get(inspectionId, checksum) as InspectionEvidence | undefined;
+  }
+  listInspectionEvidence(inspectionId: string): InspectionEvidence[] {
+    return this.database.prepare(`SELECT * FROM inspection_evidence WHERE inspection_id = ?
+      ORDER BY captured_at, id`).all(inspectionId) as unknown as InspectionEvidence[];
+  }
+  listReportEvidence(reportId: string): InspectionEvidence[] {
+    return this.database.prepare(`SELECT e.* FROM inspection_evidence e
+      JOIN generated_reports r ON r.inspection_id = e.inspection_id
+      WHERE r.id = ? ORDER BY e.captured_at, e.id`).all(reportId) as unknown as InspectionEvidence[];
+  }
+  upsertEvidence(input: Omit<InspectionEvidence, 'created_at' | 'updated_at'>): InspectionEvidence {
+    const now = new Date().toISOString();
+    const existing = this.getEvidence(input.id);
+    this.database.prepare(`INSERT INTO inspection_evidence (
+      id, inspection_id, format_type, item_id, field_key, caption, location_name_snapshot,
+      mime_type, filename, file_path, thumbnail_path, file_size, width, height, checksum,
+      captured_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET format_type=excluded.format_type, item_id=excluded.item_id,
+      field_key=excluded.field_key, caption=excluded.caption,
+      location_name_snapshot=excluded.location_name_snapshot, mime_type=excluded.mime_type,
+      filename=excluded.filename, file_path=excluded.file_path,
+      thumbnail_path=excluded.thumbnail_path, file_size=excluded.file_size,
+      width=excluded.width, height=excluded.height, checksum=excluded.checksum,
+      captured_at=excluded.captured_at, updated_at=excluded.updated_at`).run(
+      input.id, input.inspection_id, input.format_type, input.item_id, input.field_key,
+      input.caption, input.location_name_snapshot, input.mime_type, input.filename,
+      input.file_path, input.thumbnail_path, input.file_size, input.width, input.height,
+      input.checksum, input.captured_at, existing?.created_at ?? now, now
+    );
+    return this.getEvidence(input.id)!;
+  }
+  deleteEvidence(inspectionId: string, evidenceId: string): InspectionEvidence | undefined {
+    const evidence = this.getEvidence(evidenceId);
+    if (!evidence || evidence.inspection_id !== inspectionId) return undefined;
+    this.database.prepare('DELETE FROM inspection_evidence WHERE id = ? AND inspection_id = ?')
+      .run(evidenceId, inspectionId);
+    return evidence;
   }
   upsertInspectionMetadata(payload: Omit<ExtinguisherInspectionPayload, 'extinguishers'>): boolean {
     const now = new Date().toISOString();
@@ -469,7 +559,8 @@ export class LocalDatabase {
     const hydrants = rawHydrants.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
     inspection.selectedFormatIds = JSON.parse(inspection.selectedFormatIdsJson || '[]') as string[];
     const signature = this.getInspectionSignature(inspectionId);
-    return { inspection, extinguishers, hydrants, signature };
+    const evidence = this.listInspectionEvidence(inspectionId);
+    return { inspection, extinguishers, hydrants, signature, evidence };
   }
 
   saveGeneratedReport(input: {
@@ -540,12 +631,14 @@ export class LocalDatabase {
     let ids: string[] = [];
     try { ids = JSON.parse(report.selected_format_ids || '[]') as string[]; } catch { /* legacy row */ }
     const signature = this.getInspectionSignature(report.inspection_id);
+    const evidenceCount = this.listInspectionEvidence(report.inspection_id).length;
     return {
       ...report,
       formats: ids.map((id) => labels[id] ?? id).join(', ') || report.formats,
       signature_available: signature ? 1 : 0,
       signature_signer_name: signature?.signer_name ?? null,
       signature_signed_at: signature?.signed_at ?? null,
+      evidence_count: evidenceCount,
     };
   }
 
@@ -684,6 +777,7 @@ export interface GeneratedReport {
   signature_available: number;
   signature_signer_name: string | null;
   signature_signed_at: string | null;
+  evidence_count: number;
 }
 
 export interface InspectionSignature {
@@ -694,6 +788,27 @@ export interface InspectionSignature {
   file_path: string;
   signer_name: string;
   signed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InspectionEvidence {
+  id: string;
+  inspection_id: string;
+  format_type: string;
+  item_id: string | null;
+  field_key: string;
+  caption: string | null;
+  location_name_snapshot: string | null;
+  mime_type: 'image/jpeg' | 'image/png';
+  filename: string;
+  file_path: string;
+  thumbnail_path: string | null;
+  file_size: number;
+  width: number;
+  height: number;
+  checksum: string;
+  captured_at: string;
   created_at: string;
   updated_at: string;
 }
@@ -714,4 +829,5 @@ export interface InspectionReportData {
   extinguishers: ExtinguisherInspectionPayload['extinguishers'];
   hydrants: HydrantInspectionPayload['hydrants'];
   signature: InspectionSignature | undefined;
+  evidence: InspectionEvidence[];
 }

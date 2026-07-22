@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { AdminRepository } from '../src/admin-repository.js';
 import { createApp } from '../src/app.js';
 import { LocalDatabase } from '../src/database.js';
@@ -17,6 +18,22 @@ const signaturePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lE
 
 function technicianSignature(signerName = 'Daniel Cocom', signedAt = '2026-07-22T18:00:00.000Z') {
   return { mimeType: 'image/png' as const, dataBase64: signaturePngBase64, signedAt, signerName };
+}
+
+function evidenceMetadata(evidenceId = '11111111-1111-4111-8111-111111111111', itemId = 'ext-1') {
+  return { evidenceId, formatType: 'extintores', itemId, fieldKey: 'evidence',
+    caption: 'Manómetro fuera de rango', locationNameSnapshot: 'Recepción',
+    capturedAt: '2026-07-22T18:00:00.000Z', updatedAt: '2026-07-22T18:00:00.000Z' };
+}
+
+async function uploadEvidence(baseUrl: string, inspectionId: string, metadata = evidenceMetadata(),
+  bytes = Buffer.from(signaturePngBase64, 'base64'), mimeType = 'image/png') {
+  const form = new FormData();
+  form.append('inspectionId', inspectionId);
+  form.append('metadata', JSON.stringify(metadata));
+  form.append('file', new Blob([bytes], { type: mimeType }), 'evidence.png');
+  form.append('thumbnail', new Blob([bytes], { type: mimeType }), 'thumbnail.png');
+  return fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence`, { method: 'POST', body: form });
 }
 
 function fileHash(filePath: string): string {
@@ -733,4 +750,84 @@ test('invalid or oversized signatures are rejected before changing inspection da
   assert.equal(database.signatureCount(inspectionId), 1);
   assert.equal(database.getInspectionSignature(inspectionId)?.file_path, before.file_path);
   assert.equal(database.getInspectionReportData(inspectionId)?.inspection.selectedFormatIds.join(','), 'extintores');
+});
+
+test('evidence upload is idempotent, secure and appears in the official workbook', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-evidence-valid';
+  const templateHash = fileHash(templatePath);
+  const metadata = evidenceMetadata();
+  const inspection = { ...payload(inspectionId), selectedFormatIds: ['extintores'], signature: technicianSignature(), evidenceManifest: [metadata] };
+  const synced = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(inspection),
+  });
+  assert.equal(synced.status, 201);
+  assert.equal((await synced.json() as { report: null }).report, null);
+
+  const first = await uploadEvidence(baseUrl, inspectionId, metadata);
+  assert.equal(first.status, 201);
+  const second = await uploadEvidence(baseUrl, inspectionId, metadata);
+  assert.equal(second.status, 200);
+  assert.equal(database.listInspectionEvidence(inspectionId).length, 1);
+  const stored = database.getEvidence(metadata.evidenceId)!;
+  assert.ok(fs.existsSync(stored.file_path));
+  assert.equal(stored.checksum.length, 64);
+
+  const duplicate = await uploadEvidence(baseUrl, inspectionId, evidenceMetadata('22222222-2222-4222-8222-222222222222'));
+  assert.equal(duplicate.status, 409);
+  const invalidItem = await uploadEvidence(baseUrl, inspectionId, evidenceMetadata('33333333-3333-4333-8333-333333333333', 'another-inspection-item'));
+  assert.equal(invalidItem.status, 400);
+  const invalidMime = await uploadEvidence(baseUrl, inspectionId, evidenceMetadata('44444444-4444-4444-8444-444444444444'),
+    Buffer.from(signaturePngBase64, 'base64'), 'image/jpeg');
+  assert.equal(invalidMime.status, 400);
+
+  const finalized = await fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ evidenceIds: [metadata.evidenceId] }),
+  });
+  assert.equal(finalized.status, 200);
+  const body = await finalized.json() as { report: { id: string } };
+  const report = database.getReport(body.report.id)!;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.file_path);
+  const reportZip = await JSZip.loadAsync(fs.readFileSync(report.file_path));
+  assert.equal(Object.keys(reportZip.files).filter((name) => /^xl\/media\/evidence\d+-\d+\./.test(name)).length, 1);
+  const evidenceDrawing = await Promise.all(Object.keys(reportZip.files).filter((name) => /^xl\/drawings\/drawing\d+\.xml$/.test(name))
+    .map((name) => reportZip.file(name)!.async('string')));
+  assert.equal(evidenceDrawing.some((xml) => xml.includes(`Evidencia ${metadata.evidenceId}`)), true);
+  assert.equal(workbook.getWorksheet('FIRMAS')?.getImages().length, 1);
+  assert.equal(workbook.getWorksheet('EXTINTORES')?.getImages().length, 1);
+  const listed = await (await fetch(`${baseUrl}/api/reports/${body.report.id}/evidence`)).json() as { evidence: unknown[] };
+  assert.equal(listed.evidence.length, 1);
+  assert.equal((await fetch(`${baseUrl}/api/evidence/${metadata.evidenceId}/file`)).status, 200);
+  const regenerated = await fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ evidenceIds: [metadata.evidenceId] }),
+  });
+  assert.equal(regenerated.status, 200);
+  const regeneratedZip = await JSZip.loadAsync(fs.readFileSync(database.getReport(body.report.id)!.file_path));
+  assert.equal(Object.keys(regeneratedZip.files).filter((name) => /^xl\/media\/evidence\d+-\d+\./.test(name)).length, 1);
+  assert.equal(fileHash(templatePath), templateHash);
+});
+
+test('oversized evidence is rejected and deletion removes it from the regenerated report', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-evidence-delete';
+  const metadata = evidenceMetadata();
+  await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload(inspectionId), selectedFormatIds: ['extintores'], evidenceManifest: [metadata] }),
+  });
+  assert.equal((await uploadEvidence(baseUrl, inspectionId, metadata)).status, 201);
+  const oversized = await uploadEvidence(baseUrl, inspectionId, evidenceMetadata('55555555-5555-4555-8555-555555555555'), Buffer.alloc(5 * 1024 * 1024 + 1), 'image/png');
+  assert.equal(oversized.status, 413);
+  const stored = database.getEvidence(metadata.evidenceId)!;
+  assert.equal((await fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence/${metadata.evidenceId}`, { method: 'DELETE' })).status, 200);
+  assert.equal(database.listInspectionEvidence(inspectionId).length, 0);
+  assert.equal(fs.existsSync(stored.file_path), false);
+  const finalized = await fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ evidenceIds: [] }),
+  });
+  const reportId = (await finalized.json() as { report: { id: string } }).report.id;
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(database.getReport(reportId)!.file_path);
+  assert.equal(workbook.getWorksheet('EVIDENCIAS')?.getImages().length, 0);
 });

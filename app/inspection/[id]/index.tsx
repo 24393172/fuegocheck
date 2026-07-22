@@ -24,6 +24,8 @@ import {
 } from '../../../lib/inspection-formats';
 import { getInspection, updateInspection, updateOfficialReport, updateStatus, updateSyncState } from '../../../lib/repositories/inspections.repo';
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
+import { deletePhoto, getPhotosByInspection, markPhotoError, markPhotoSynced, markPhotoUploading } from '../../../lib/repositories/photos.repo';
+import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { PUMP_SCHEMAS } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
 import { Inspection, Signature } from '../../../types/inspection.types';
@@ -32,7 +34,10 @@ import {
   checkServerHealth,
   inspectionDateToIso,
   LocalServerApiError,
+  deleteInspectionEvidence,
+  finalizeInspectionEvidence,
   syncInspection,
+  uploadInspectionEvidence,
 } from '../../../services/local-server-api';
 
 function formatProgress(schema: FormSchema, data: Record<string, unknown>) {
@@ -250,6 +255,8 @@ export default function InspectionIndexScreen() {
         technician: { id: null, name: siteData.tecnico || currentInspection.technician_name },
         syncVersion: currentInspection.updated_at,
       };
+      const evidence = await getPhotosByInspection(id, true);
+      const activeEvidence = evidence.filter((photo) => !photo.is_deleted);
       const response = await syncInspection({
         ...commonPayload,
         selectedFormatIds: selectedIds,
@@ -263,13 +270,46 @@ export default function InspectionIndexScreen() {
           signedAt: new Date(signature.signed_at).toISOString(),
           signerName: currentInspection.technician_name,
         } : null,
+        evidenceManifest: activeEvidence.map((photo) => ({
+          evidenceId: photo.id, formatType: photo.format_type, itemId: photo.item_id,
+          fieldKey: photo.field_key, caption: photo.caption,
+          locationNameSnapshot: photo.location_name_snapshot,
+          capturedAt: new Date(photo.created_at).toISOString(), updatedAt: new Date(photo.updated_at).toISOString(),
+        })),
       });
+
+      const missingEvidence = new Set(response.missingEvidenceIds ?? []);
+      for (const photo of activeEvidence.filter((item) => item.sync_status !== 'synced' || missingEvidence.has(item.id))) {
+        try {
+          await markPhotoUploading(photo.id);
+          const uploaded = await uploadInspectionEvidence(photo);
+          await markPhotoSynced(photo.id, uploaded.id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'No se pudo subir la evidencia';
+          await markPhotoError(photo.id, message);
+          const remaining = (await getPhotosByInspection(id)).filter((item) => item.sync_status !== 'synced').length;
+          throw new Error(`EVIDENCE_PENDING:${remaining}`);
+        }
+      }
+      for (const photo of evidence.filter((item) => item.is_deleted)) {
+        try {
+          await deleteInspectionEvidence(id, photo.server_evidence_id ?? photo.id);
+        } catch (error) {
+          if (!(error instanceof LocalServerApiError && error.status === 404)) {
+            await markPhotoError(photo.id, error instanceof Error ? error.message : 'No se pudo eliminar la evidencia');
+            throw new Error('EVIDENCE_PENDING:1');
+          }
+        }
+        await deletePhoto(photo.id);
+        await deletePhotoFiles(photo.local_uri, photo.thumbnail_uri);
+      }
+      const finalized = await finalizeInspectionEvidence(id, activeEvidence.map((photo) => photo.id));
 
       const syncedAt = Date.now();
       const syncedFormatIds = response.syncedFormatIds ?? [];
       const outcome = resolveSyncOutcome(selectedIds, syncedFormatIds);
       await updateSyncState(id, outcome.status, outcome.message, syncedFormatIds);
-      await updateOfficialReport(id, response.report);
+      await updateOfficialReport(id, finalized.report);
       setInspection((current) => current ? {
         ...current,
         sync_status: outcome.status,
@@ -277,24 +317,30 @@ export default function InspectionIndexScreen() {
         last_sync_attempt: syncedAt,
         sync_error: outcome.message,
         synced_format_ids: JSON.stringify(syncedFormatIds),
-        official_report_id: response.report?.id ?? null,
-        official_report_filename: response.report?.filename ?? null,
-        official_report_download_url: response.report?.downloadUrl ?? null,
+        official_report_id: finalized.report.id,
+        official_report_filename: finalized.report.filename,
+        official_report_download_url: finalized.report.downloadUrl,
       } : current);
       Alert.alert('Sincronización completa', 'Inspección sincronizada correctamente con el servidor local.');
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown synchronization error';
-      await updateSyncState(id, 'error', message).catch((stateError) =>
+      const rawMessage = error instanceof Error ? error.message : 'Unknown synchronization error';
+      const evidencePending = rawMessage.startsWith('EVIDENCE_PENDING:');
+      const message = evidencePending
+        ? `Datos sincronizados, ${rawMessage.split(':')[1] || '1'} fotografía(s) pendiente(s).`
+        : rawMessage;
+      await updateSyncState(id, evidencePending ? 'partial' : 'error', message).catch((stateError) =>
         console.error('[inspection] Could not persist sync error:', stateError)
       );
       setInspection((current) => current ? {
         ...current,
-        sync_status: 'error',
+        sync_status: evidencePending ? 'partial' : 'error',
         last_sync_attempt: Date.now(),
         sync_error: message,
       } : current);
 
-      if (error instanceof LocalServerApiError && ['NETWORK', 'TIMEOUT', 'CONFIGURATION'].includes(error.code)) {
+      if (evidencePending) {
+        Alert.alert('Evidencias pendientes', message);
+      } else if (error instanceof LocalServerApiError && ['NETWORK', 'TIMEOUT', 'CONFIGURATION'].includes(error.code)) {
         Alert.alert(
           'Servidor no disponible',
           'No se encontró el servidor local. Verifica que la computadora esté encendida y conectada a la misma red Wi-Fi. La inspección continúa guardada en este dispositivo.'

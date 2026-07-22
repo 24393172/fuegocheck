@@ -2,13 +2,14 @@ import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import multer from 'multer';
 import { ZodError } from 'zod';
 import { AdminRepository } from './admin-repository.js';
 import { createAdminRouter } from './admin-router.js';
 import { LocalDatabase } from './database.js';
 import { ExtinguisherReportService } from './report-generator.js';
-import { extinguisherInspectionSchema, hydrantInspectionSchema, inspectionSyncSchema } from './validation.js';
+import { evidenceFinalizeSchema, evidenceMetadataSchema, extinguisherInspectionSchema, hydrantInspectionSchema, inspectionSyncSchema } from './validation.js';
 
 let syncQueue: Promise<void> = Promise.resolve();
 
@@ -23,6 +24,25 @@ function isInsideDirectory(filePath: string, directory: string): boolean {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+function actualImage(buffer: Buffer): { mimeType: 'image/jpeg' | 'image/png'; width: number; height: number } | null {
+  if (buffer.length >= 24 && buffer.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') {
+    return { mimeType: 'image/png', width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) { offset += 1; continue; }
+    const marker = buffer[offset + 1];
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      return { mimeType: 'image/jpeg', height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) };
+    }
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    offset += length + 2;
+  }
+  return null;
+}
+
 export function createApp(
   database: LocalDatabase,
   allowedOrigins: string[],
@@ -32,7 +52,11 @@ export function createApp(
 ) {
   const app = express();
   const signaturesDirectory = path.join(path.dirname(database.filePath), 'signatures');
+  const evidenceDirectory = path.join(path.dirname(database.filePath), 'evidence');
   fs.mkdirSync(signaturesDirectory, { recursive: true });
+  fs.mkdirSync(evidenceDirectory, { recursive: true });
+  const evidenceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 2, fields: 4 } })
+    .fields([{ name: 'file', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }]);
   app.disable('x-powered-by');
   app.use(cors({
     origin(origin, callback) {
@@ -42,7 +66,7 @@ export function createApp(
       }
       callback(new Error('Origin not allowed by local CORS policy'));
     },
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   }));
   // The request also contains inspection data, so transport overhead must be
   // larger than the validated 1 MiB decoded PNG signature limit.
@@ -188,7 +212,8 @@ export function createApp(
               database.deleteInspectionSignature(payload.inspectionId);
             }
           }
-          const report = supported.length ? await reportService.generate(payload.inspectionId, { recordFailure: false }) : null;
+          const report = supported.length && payload.evidenceManifest === undefined
+            ? await reportService.generate(payload.inspectionId, { recordFailure: false }) : null;
           database.commitSync();
           transactionStarted = false;
           if (payload.signature !== undefined && previousSignature?.file_path
@@ -219,11 +244,187 @@ export function createApp(
           id: result.report.id, filename: result.report.filename,
           downloadUrl: `/api/reports/${result.report.id}/download`, generatedAt: result.report.generated_at,
         } : null,
+        evidencePending: payload.evidenceManifest?.filter((item) => !database.getEvidence(item.evidenceId)).length ?? 0,
+        missingEvidenceIds: payload.evidenceManifest?.filter((item) => !database.getEvidence(item.evidenceId)).map((item) => item.evidenceId) ?? [],
       });
     } catch (error) {
       console.error('[server] Atomic inspection synchronization failed:', error);
       response.status(500).json({ ok: false, inspectionSaved: false, message: 'Inspection synchronization failed' });
     }
+  });
+
+  app.post('/api/inspections/:inspectionId/evidence', evidenceUpload, async (request, response) => {
+    try {
+      const metadata = evidenceMetadataSchema.parse(JSON.parse(String(request.body.metadata ?? 'null')));
+      if (metadata.evidenceId.length > 128 || request.params.inspectionId !== String(request.body.inspectionId ?? '')) {
+        response.status(400).json({ ok: false, message: 'Evidence metadata does not match inspection' }); return;
+      }
+      const inspectionId = request.params.inspectionId;
+      const reportData = database.getInspectionReportData(inspectionId);
+      if (!reportData) { response.status(404).json({ ok: false, message: 'Inspection not found' }); return; }
+      if (metadata.formatType !== 'legacy' && !reportData.inspection.selectedFormatIds.includes(metadata.formatType)) {
+        response.status(400).json({ ok: false, message: 'Evidence format is not selected for inspection' }); return;
+      }
+      if (!database.evidenceItemBelongs(inspectionId, metadata.formatType, metadata.itemId)) {
+        response.status(400).json({ ok: false, message: 'Evidence item does not belong to inspection' }); return;
+      }
+      const files = request.files as Record<string, Express.Multer.File[]> | undefined;
+      const original = files?.file?.[0];
+      const thumbnail = files?.thumbnail?.[0];
+      if (!original) { response.status(400).json({ ok: false, message: 'Evidence file is required' }); return; }
+      const image = actualImage(original.buffer);
+      const thumbImage = thumbnail ? actualImage(thumbnail.buffer) : null;
+      if (!image || image.mimeType !== original.mimetype || !image.width || !image.height
+          || image.width > 1600 || image.height > 1600) {
+        response.status(400).json({ ok: false, message: 'Invalid evidence image' }); return;
+      }
+      if (thumbnail && (!thumbImage || thumbnail.buffer.length > 512 * 1024
+          || thumbImage.width > 240 || thumbImage.height > 240)) {
+        response.status(400).json({ ok: false, message: 'Invalid evidence thumbnail' }); return;
+      }
+      const checksum = createHash('sha256').update(original.buffer).digest('hex');
+      const existing = database.getEvidence(metadata.evidenceId);
+      if (existing && existing.inspection_id !== inspectionId) {
+        response.status(409).json({ ok: false, message: 'Evidence id belongs to another inspection' }); return;
+      }
+      const duplicate = database.getEvidenceByChecksum(inspectionId, checksum);
+      if (duplicate && duplicate.id !== metadata.evidenceId) {
+        response.status(409).json({ ok: false, message: 'Duplicate evidence content', evidenceId: duplicate.id }); return;
+      }
+      const currentEvidence = database.listInspectionEvidence(inspectionId);
+      if (!existing && currentEvidence.length >= 100) {
+        response.status(409).json({ ok: false, message: 'Inspection evidence limit reached' }); return;
+      }
+      const relatedCount = currentEvidence.filter((item) => item.id !== metadata.evidenceId
+        && item.format_type === metadata.formatType && item.item_id === metadata.itemId
+        && (metadata.itemId !== null || item.field_key === metadata.fieldKey)).length;
+      if (!existing && relatedCount >= 3) {
+        response.status(409).json({ ok: false, message: 'Equipment evidence limit reached' }); return;
+      }
+      if (existing?.checksum === checksum) {
+        const saved = database.upsertEvidence({
+          ...existing, format_type: metadata.formatType, item_id: metadata.itemId,
+          field_key: metadata.fieldKey, caption: metadata.caption,
+          location_name_snapshot: metadata.locationNameSnapshot, captured_at: metadata.capturedAt,
+        });
+        response.json({ ok: true, created: false, evidence: {
+          id: saved.id, checksum: saved.checksum, fileUrl: `/api/evidence/${saved.id}/file`,
+          thumbnailUrl: `/api/evidence/${saved.id}/thumbnail`,
+        } }); return;
+      }
+      const inspectionFolder = createHash('sha256').update(inspectionId).digest('hex').slice(0, 32);
+      const directory = path.join(evidenceDirectory, inspectionFolder);
+      fs.mkdirSync(directory, { recursive: true });
+      const extension = image.mimeType === 'image/png' ? 'png' : 'jpg';
+      const newFilePath = path.join(directory, `${randomUUID()}.${extension}`);
+      const newThumbnailPath = thumbnail ? path.join(directory, `${randomUUID()}_thumb.${thumbImage!.mimeType === 'image/png' ? 'png' : 'jpg'}`) : null;
+      const stagedFile = `${newFilePath}.pending`;
+      const stagedThumbnail = newThumbnailPath && `${newThumbnailPath}.pending`;
+      fs.writeFileSync(stagedFile, original.buffer, { flag: 'wx' });
+      if (thumbnail && stagedThumbnail) fs.writeFileSync(stagedThumbnail, thumbnail.buffer, { flag: 'wx' });
+      let transactionStarted = false;
+      try {
+        database.beginSync(); transactionStarted = true;
+        fs.renameSync(stagedFile, newFilePath);
+        if (stagedThumbnail && newThumbnailPath) fs.renameSync(stagedThumbnail, newThumbnailPath);
+        const saved = database.upsertEvidence({
+          id: metadata.evidenceId, inspection_id: inspectionId, format_type: metadata.formatType,
+          item_id: metadata.itemId, field_key: metadata.fieldKey, caption: metadata.caption,
+          location_name_snapshot: metadata.locationNameSnapshot, mime_type: image.mimeType,
+          filename: `evidence-${metadata.evidenceId}.${extension}`, file_path: newFilePath,
+          thumbnail_path: newThumbnailPath, file_size: original.buffer.length,
+          width: image.width, height: image.height, checksum, captured_at: metadata.capturedAt,
+        });
+        database.commitSync(); transactionStarted = false;
+        for (const oldPath of [existing?.file_path, existing?.thumbnail_path]) {
+          if (oldPath && oldPath !== newFilePath && oldPath !== newThumbnailPath && isInsideDirectory(oldPath, evidenceDirectory)) {
+            fs.rmSync(oldPath, { force: true });
+          }
+        }
+        response.status(existing ? 200 : 201).json({ ok: true, created: !existing, evidence: {
+          id: saved.id, checksum: saved.checksum, fileUrl: `/api/evidence/${saved.id}/file`,
+          thumbnailUrl: `/api/evidence/${saved.id}/thumbnail`,
+        } });
+      } catch (error) {
+        if (transactionStarted) database.rollbackSync();
+        for (const candidate of [stagedFile, stagedThumbnail, newFilePath, newThumbnailPath]) {
+          if (candidate && isInsideDirectory(candidate, evidenceDirectory)) fs.rmSync(candidate, { force: true });
+        }
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof ZodError || error instanceof SyntaxError) {
+        response.status(400).json({ ok: false, message: 'Invalid evidence metadata' }); return;
+      }
+      console.error('[server] Evidence upload failed:', error);
+      response.status(500).json({ ok: false, message: 'Evidence upload failed' });
+    }
+  });
+
+  app.delete('/api/inspections/:inspectionId/evidence/:evidenceId', async (request, response) => {
+    const evidence = database.getEvidence(request.params.evidenceId);
+    if (!evidence || evidence.inspection_id !== request.params.inspectionId) {
+      response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
+    }
+    database.beginSync();
+    try { database.deleteEvidence(request.params.inspectionId, request.params.evidenceId); database.commitSync(); }
+    catch (error) { database.rollbackSync(); throw error; }
+    for (const candidate of [evidence.file_path, evidence.thumbnail_path]) {
+      if (candidate && isInsideDirectory(candidate, evidenceDirectory)) fs.rmSync(candidate, { force: true });
+    }
+    response.json({ ok: true, deleted: true });
+  });
+
+  app.post('/api/inspections/:inspectionId/evidence/finalize', async (request, response) => {
+    try {
+      const payload = evidenceFinalizeSchema.parse(request.body);
+      const actual = database.listInspectionEvidence(request.params.inspectionId).map((item) => item.id).sort();
+      const expected = [...payload.evidenceIds].sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+        response.status(409).json({ ok: false, message: 'Evidence synchronization is incomplete', expected: expected.length, received: actual.length }); return;
+      }
+      const report = await serializeSync(() => reportService.generate(request.params.inspectionId));
+      response.json({ ok: true, evidenceCount: actual.length, report: {
+        id: report.id, filename: report.filename, downloadUrl: `/api/reports/${report.id}/download`, generatedAt: report.generated_at,
+      } });
+    } catch (error) {
+      if (error instanceof ZodError) { response.status(400).json({ ok: false, message: 'Invalid evidence manifest' }); return; }
+      console.error('[server] Evidence finalization failed:', error);
+      response.status(500).json({ ok: false, message: 'Evidence finalization failed' });
+    }
+  });
+
+  app.get('/api/reports/:reportId/evidence', (request, response) => {
+    if (!database.getReport(request.params.reportId)) { response.status(404).json({ ok: false, message: 'Report not found' }); return; }
+    response.json({ ok: true, evidence: database.listReportEvidence(request.params.reportId).map((item) => {
+      const reportData = database.getInspectionReportData(item.inspection_id);
+      const equipmentLabel = item.item_id ? (item.format_type === 'extintores'
+        ? reportData?.extinguishers.find((record) => record.id === item.item_id)?.numero
+        : item.format_type === 'hidrantes' ? reportData?.hydrants.find((record) => record.id === item.item_id)?.numero : null) ?? item.item_id : null;
+      return {
+        id: item.id, formatType: item.format_type, itemId: item.item_id, equipmentLabel,
+        fieldKey: item.field_key, caption: item.caption, locationNameSnapshot: item.location_name_snapshot,
+        capturedAt: item.captured_at, width: item.width, height: item.height,
+        fileUrl: `/api/evidence/${item.id}/file`, thumbnailUrl: `/api/evidence/${item.id}/thumbnail`,
+      };
+    }) });
+  });
+
+  app.get('/api/evidence/:id/file', (request, response) => {
+    const evidence = database.getEvidence(request.params.id);
+    if (!evidence || !isInsideDirectory(evidence.file_path, evidenceDirectory) || !fs.existsSync(evidence.file_path)) {
+      response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
+    }
+    response.type(evidence.mime_type).sendFile(path.resolve(evidence.file_path));
+  });
+
+  app.get('/api/evidence/:id/thumbnail', (request, response) => {
+    const evidence = database.getEvidence(request.params.id);
+    const target = evidence?.thumbnail_path || evidence?.file_path;
+    if (!evidence || !target || !isInsideDirectory(target, evidenceDirectory) || !fs.existsSync(target)) {
+      response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
+    }
+    response.type(evidence.mime_type).sendFile(path.resolve(target));
   });
 
   app.get('/api/reports', (_request, response) => {
@@ -243,6 +444,7 @@ export function createApp(
         signatureAvailable: report.signature_available === 1,
         signatureSignerName: report.signature_signer_name,
         signatureSignedAt: report.signature_signed_at,
+        evidenceCount: report.evidence_count,
         templateVersion: report.template_version,
         companyName: report.company_name,
         inspectionDate: report.inspection_date,
@@ -281,6 +483,11 @@ export function createApp(
   });
 
   app.use((error: Error, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+    if (error instanceof multer.MulterError) {
+      response.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400)
+        .json({ ok: false, message: 'Invalid or oversized evidence upload' });
+      return;
+    }
     if ((error as Error & { type?: string }).type === 'entity.too.large') {
       response.status(413).json({ ok: false, message: 'Inspection payload is too large' });
       return;

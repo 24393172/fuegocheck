@@ -17,6 +17,8 @@ import {
 } from '../../../lib/hydrants';
 import { parseFormData } from '../../../lib/form-data';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
+import { getPhotosForItem, requestPhotoDeletion } from '../../../lib/repositories/photos.repo';
+import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { HydrantCollection, HydrantRecord } from '../../../types/hydrant.types';
 import { Inspection } from '../../../types/inspection.types';
 
@@ -101,6 +103,10 @@ export default function HydrantsScreen() {
                   pumps: { ...pumps, hidrantes: nextCollection },
                 }),
               });
+              for (const photo of await getPhotosForItem(id, 'hidrantes', item.id)) {
+                const outcome = await requestPhotoDeletion(photo);
+                if (outcome === 'deleted_local') await deletePhotoFiles(photo.local_uri, photo.thumbnail_uri);
+              }
               setCollection(nextCollection);
             } catch (error) {
               console.error('[hydrants] Failed to delete:', error);

@@ -74,6 +74,17 @@ export interface Photo {
   thumbnail_uri: string | null;
   caption: string | null;
   created_at: number;
+  updated_at: number;
+  format_type: string;
+  item_id: string | null;
+  location_name_snapshot: string | null;
+  sync_status: 'pending' | 'uploading' | 'synced' | 'error';
+  synced_at: number | null;
+  last_sync_attempt: number | null;
+  sync_error: string | null;
+  server_evidence_id: string | null;
+  is_deleted: boolean;
+  legacy: boolean;
 }
 
 export interface Signature {

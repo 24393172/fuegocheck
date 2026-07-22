@@ -27,6 +27,7 @@ import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { HydrantRecord } from '../../../types/hydrant.types';
 import { CatalogLocation } from '../../../types/catalog.types';
 import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
+import EquipmentEvidenceField from '../../../components/forms/EquipmentEvidenceField';
 
 const hydrantSchema = INSPECTION_SCHEMAS.find((schema) => schema.id === 'hidrantes');
 
@@ -345,6 +346,16 @@ export default function HydrantEditorScreen() {
           ))}
         </View>
       ))}
+
+      <EquipmentEvidenceField
+        inspectionId={id}
+        formatType="hidrantes"
+        itemId={recordId}
+        locationNameSnapshot={watchedValues.locationNameSnapshot || watchedValues.ubicacion || ''}
+        readOnly={isReadOnly}
+        beforeCapture={() => queueSave(getValues())}
+        canCapture={hasAnyHydrantData(watchedValues)}
+      />
 
       <TouchableOpacity
         style={[styles.saveButton, isSaving && styles.disabledButton]}
