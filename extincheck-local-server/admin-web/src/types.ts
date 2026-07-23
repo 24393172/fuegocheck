@@ -15,7 +15,12 @@ export interface Branch {
   active: boolean;
 }
 
-export type EquipmentType = 'extinguisher' | 'hydrant';
+export type EquipmentType =
+  | 'extinguisher'
+  | 'hydrant'
+  | 'addressed_device'
+  | 'conventional_device'
+  | 'notification_device';
 
 export interface Location {
   id: string;
@@ -53,6 +58,20 @@ export interface Report {
     answered: number;
     total: number;
   }>;
+  alarmForms: Array<{
+    formType: 'alarm_panel' | 'addressed_devices' | 'conventional_devices' | 'notification_devices';
+    status: string;
+    updatedAt: string;
+    itemCount: number;
+    answered: number;
+  }>;
+  ansulForm?: {
+    status: string;
+    systemName: string;
+    capacityGallons: string;
+    updatedAt: string;
+    answered: number;
+  };
   templateVersion: string;
   companyName: string;
   inspectionDate: string;

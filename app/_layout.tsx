@@ -125,6 +125,10 @@ export default function RootLayout() {
         <Stack.Screen name="inspection/[id]/fill" options={{ title: 'Inspección' }} />
         <Stack.Screen name="inspection/[id]/extinguishers" options={{ title: 'Extintores' }} />
         <Stack.Screen name="inspection/[id]/extinguisher-editor" options={{ title: 'Extintor' }} />
+        <Stack.Screen name="inspection/[id]/hydrants" options={{ title: 'Hidrantes' }} />
+        <Stack.Screen name="inspection/[id]/hydrant-editor" options={{ title: 'Hidrante' }} />
+        <Stack.Screen name="inspection/[id]/alarm-devices" options={{ title: 'Dispositivos' }} />
+        <Stack.Screen name="inspection/[id]/alarm-device-editor" options={{ title: 'Dispositivo' }} />
         <Stack.Screen name="inspection/[id]/pdf-preview" options={{ title: 'Inspección' }} />
       </Stack>
     </PaperProvider>

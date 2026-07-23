@@ -12,7 +12,13 @@ import {
 const shortText = z.string().trim().max(300);
 const locationSchema = z.object({
   id: z.uuid(),
-  equipmentType: z.enum(['extinguisher', 'hydrant']),
+  equipmentType: z.enum([
+    'extinguisher',
+    'hydrant',
+    'addressed_device',
+    'conventional_device',
+    'notification_device',
+  ]),
   name: z.string().trim().min(1).max(160),
   branchId: z.uuid().nullable(),
   area: shortText.default(''),
@@ -197,10 +203,13 @@ export async function getCatalogStatus(): Promise<CatalogStatus> {
       companies: number;
       extinguisherLocations: number;
       hydrantLocations: number;
+      alarmLocations: number;
     }>(`SELECT
       (SELECT COUNT(*) FROM catalog_companies WHERE active = 1) AS companies,
       (SELECT COUNT(*) FROM catalog_locations WHERE active = 1 AND equipment_type = 'extinguisher') AS extinguisherLocations,
-      (SELECT COUNT(*) FROM catalog_locations WHERE active = 1 AND equipment_type = 'hydrant') AS hydrantLocations`),
+      (SELECT COUNT(*) FROM catalog_locations WHERE active = 1 AND equipment_type = 'hydrant') AS hydrantLocations,
+      (SELECT COUNT(*) FROM catalog_locations WHERE active = 1 AND equipment_type IN
+        ('addressed_device', 'conventional_device', 'notification_device')) AS alarmLocations`),
   ]);
   const values = Object.fromEntries(metadata.map((row) => [row.key, row.value]));
   const lastSync = Number(values.last_catalog_sync);
@@ -211,6 +220,7 @@ export async function getCatalogStatus(): Promise<CatalogStatus> {
     companies: counts?.companies ?? 0,
     extinguisherLocations: counts?.extinguisherLocations ?? 0,
     hydrantLocations: counts?.hydrantLocations ?? 0,
+    alarmLocations: counts?.alarmLocations ?? 0,
   };
 }
 

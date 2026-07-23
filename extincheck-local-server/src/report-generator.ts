@@ -4,9 +4,18 @@ import { randomUUID } from 'node:crypto';
 import JSZip from 'jszip';
 import { GeneratedReport, InspectionReportData, LocalDatabase } from './database.js';
 import { FIRE_PUMP_CONFIG, FIRE_PUMP_FORM_TYPES } from './fire-pump-config.js';
+import {
+  ALARM_DEVICE_CONFIG,
+  ALARM_PANEL_QUESTION_CELLS,
+  AlarmDeviceFormType,
+} from './alarm-config.js';
+import {
+  ANSUL_QUESTION_CELLS,
+  wrapAnsulObservations,
+} from './ansul-config.js';
 
 const FORMAT_TYPE = 'inspection';
-const TEMPLATE_VERSION = 'cancun-fire-pumps-v5';
+const TEMPLATE_VERSION = 'cancun-ansul-v7';
 
 const EXTINGUISHER_RANGE = { firstRow: 14, lastRow: 128, firstColumn: 1, lastColumn: 35 };
 const HYDRANT_RANGE = { firstRow: 13, lastRow: 50, firstColumn: 1, lastColumn: 35 };
@@ -19,19 +28,19 @@ type SheetCleanup = { cells: readonly string[]; ranges: readonly CleanupRange[] 
 export const SHEET_CLEANUP_CONFIG: Readonly<Record<string, SheetCleanup>> = {
   'Tablero A&D': { cells: ['F9', 'F10', 'F11', 'F12'], ranges: [
     { firstRow: 18, lastRow: 46, firstColumn: 17, lastColumn: 22 },
-    { firstRow: 18, lastRow: 46, firstColumn: 27, lastColumn: 36 },
+    { firstRow: 18, lastRow: 46, firstColumn: 23, lastColumn: 36 },
     { firstRow: 49, lastRow: 57, firstColumn: 1, lastColumn: 36 },
   ] },
   'Dispositivos A&D': { cells: ['F9', 'F10', 'F11'], ranges: [
-    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 17, lastRow: 36, firstColumn: 1, lastColumn: 38 },
     { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
   ] },
   'Dispositivos Convencionales': { cells: ['F9', 'F10', 'F11'], ranges: [
-    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 17, lastRow: 36, firstColumn: 1, lastColumn: 38 },
     { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
   ] },
   'Dispositivos Notificacion': { cells: ['F9', 'F10', 'F11'], ranges: [
-    { firstRow: 17, lastRow: 37, firstColumn: 1, lastColumn: 38 },
+    { firstRow: 17, lastRow: 36, firstColumn: 1, lastColumn: 38 },
     { firstRow: 39, lastRow: 40, firstColumn: 1, lastColumn: 38 },
   ] },
   'B Jockey': { cells: ['F9', 'F10', 'F11', 'F12', 'AI10', 'AI11', 'AI12'], ranges: [
@@ -54,7 +63,7 @@ export const SHEET_CLEANUP_CONFIG: Readonly<Record<string, SheetCleanup>> = {
   'Ansul R-102': { cells: ['F9', 'F10', 'F11', 'F12'], ranges: [
     { firstRow: 17, lastRow: 33, firstColumn: 17, lastColumn: 22 },
     { firstRow: 17, lastRow: 33, firstColumn: 23, lastColumn: 36 },
-    { firstRow: 36, lastRow: 44, firstColumn: 1, lastColumn: 39 },
+    { firstRow: 36, lastRow: 43, firstColumn: 6, lastColumn: 36 },
   ] },
 };
 
@@ -254,6 +263,23 @@ function writePumpValue(
   return numeric === null
     ? writeCell(sheetXml, address, String(value), strings)
     : writeNumberCell(sheetXml, address, numeric);
+}
+
+function writeAnsulValue(
+  sheetXml: string,
+  address: string,
+  value: string | number,
+  strings: SharedStringWriter,
+  numericString = false
+): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return writeNumberCell(sheetXml, address, value);
+  }
+  const rendered = String(value);
+  if (numericString && /^-?(?:\d+|\d*\.\d+)$/.test(rendered.trim())) {
+    return writeNumberCell(sheetXml, address, Number(rendered));
+  }
+  return writeCell(sheetXml, address, rendered, strings);
 }
 
 async function worksheetPath(zip: JSZip, sheetName: string): Promise<string> {
@@ -514,11 +540,21 @@ export class ExtinguisherReportService {
     const includesHydrants = data.inspection.selectedFormatIds.includes('hidrantes');
     const includesFirePumps = ['jockey', 'electrica', 'diesel']
       .every((id) => data.inspection.selectedFormatIds.includes(id));
-    if (!includesExtinguishers && !includesHydrants && !includesFirePumps) {
+    const includesAlarms = [
+      'tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion',
+    ].every((id) => data.inspection.selectedFormatIds.includes(id));
+    const includesAnsul = data.inspection.selectedFormatIds.includes('ansul_r102');
+    if (!includesExtinguishers && !includesHydrants && !includesFirePumps && !includesAlarms && !includesAnsul) {
       throw new Error('Inspection has no supported formats');
     }
     if (data.extinguishers.length > 115) throw new Error('A report cannot contain more than 115 extinguishers');
     if (data.hydrants.length > 38) throw new Error('A report cannot contain more than 38 hydrants');
+    if (includesAlarms) {
+      for (const formType of Object.keys(ALARM_DEVICE_CONFIG) as AlarmDeviceFormType[]) {
+        const count = data.alarms.items.filter((item) => item.formType === formType).length;
+        if (count > 20) throw new Error(`A report cannot contain more than 20 ${formType}`);
+      }
+    }
 
     const previous = this.database.getReportForInspection(inspectionId, FORMAT_TYPE);
     const filename = this.availableFilename(data, previous);
@@ -643,6 +679,114 @@ export class ExtinguisherReportService {
           }
           cleanedSheets.set(pumpPath, pumpXml);
         }
+      }
+
+      if (includesAlarms) {
+        const panelPath = await worksheetPath(zip, 'Tablero A&D');
+        let panelXml = cleanedSheets.get(panelPath);
+        if (!panelXml) throw new Error('Cleaned worksheet was not found: Tablero A&D');
+        panelXml = writeCell(panelXml, 'F9', data.inspection.companyName, strings);
+        panelXml = writeCell(panelXml, 'F10', data.inspection.attention, strings);
+        panelXml = writeCell(panelXml, 'F11', data.inspection.area, strings);
+        panelXml = writeCell(panelXml, 'F12', data.inspection.inspectionDate, strings);
+        const panel = data.alarms.forms.find((form) => form.formType === 'alarm_panel');
+        if (!panel) throw new Error('Missing alarm panel form');
+        const panelAnswers = new Map(panel.answers.map((answer) => [answer.questionId, answer]));
+        for (const [questionId, cells] of Object.entries(ALARM_PANEL_QUESTION_CELLS)) {
+          const answer = panelAnswers.get(questionId);
+          if (!answer) continue;
+          if (answer.answer) {
+            const target = answer.answer === 'si'
+              ? cells.yesCell
+              : answer.answer === 'na' ? cells.naCell : cells.noCell;
+            panelXml = writeCell(panelXml, target, 'X', strings);
+          }
+          if (answer.parameter !== null && answer.parameter !== undefined && answer.parameter !== '') {
+            panelXml = writeCell(panelXml, cells.parameterCell, String(answer.parameter), strings);
+          }
+          if (answer.reading !== null && answer.reading !== undefined && answer.reading !== '') {
+            panelXml = writeCell(panelXml, cells.readingCell, String(answer.reading), strings);
+          }
+          if (answer.comment) panelXml = writeCell(panelXml, cells.commentCell, answer.comment, strings);
+        }
+        // The official workbook starts the editable observation area at F49.
+        if (panel.observations) panelXml = writeCell(panelXml, 'F49', panel.observations, strings);
+        cleanedSheets.set(panelPath, panelXml);
+
+        for (const formType of Object.keys(ALARM_DEVICE_CONFIG) as AlarmDeviceFormType[]) {
+          const config = ALARM_DEVICE_CONFIG[formType];
+          const devicePath = await worksheetPath(zip, config.sheetName);
+          const cleanedDeviceXml = cleanedSheets.get(devicePath);
+          if (!cleanedDeviceXml) throw new Error(`Cleaned worksheet was not found: ${config.sheetName}`);
+          let deviceXml: string = cleanedDeviceXml;
+          deviceXml = writeCell(deviceXml, 'F9', data.inspection.companyName, strings);
+          deviceXml = writeCell(deviceXml, 'F10', data.alarms.systemName, strings);
+          deviceXml = writeCell(deviceXml, 'F11', data.inspection.inspectionDate, strings);
+          const items = data.alarms.items.filter((item) => item.formType === formType);
+          items.forEach((item, index) => {
+            const row = config.firstRow + index;
+            for (const [column, value] of [
+              [config.columns.identifier, item.identifier],
+              [config.columns.loop, item.loop],
+              [config.columns.deviceType, item.deviceType],
+              [config.columns.location, item.locationNameSnapshot],
+              [config.columns.alarm, item.alarm ? inspectionCheckValue(item.alarm) : ''],
+              [config.columns.supervision, item.supervision ? inspectionCheckValue(item.supervision) : ''],
+              [config.columns.cleaning, item.cleaning ? inspectionCheckValue(item.cleaning) : ''],
+              [config.columns.comments, item.observations],
+            ] as Array<[string, string]>) {
+              if (value) deviceXml = writeCell(deviceXml, `${column}${row}`, value, strings);
+            }
+          });
+          const form = data.alarms.forms.find((candidate) => candidate.formType === formType);
+          if (!form) throw new Error(`Missing alarm form: ${formType}`);
+          if (form.observations) deviceXml = writeCell(deviceXml, 'A39', form.observations, strings);
+          cleanedSheets.set(devicePath, deviceXml);
+        }
+      }
+
+      if (includesAnsul) {
+        if (!data.ansul) throw new Error('Missing Ansul R-102 form');
+        const ansulPath = await worksheetPath(zip, 'Ansul R-102');
+        let ansulXml = cleanedSheets.get(ansulPath);
+        if (!ansulXml) throw new Error('Cleaned worksheet was not found: Ansul R-102');
+        ansulXml = writeCell(ansulXml, 'F9', data.inspection.companyName, strings);
+        ansulXml = writeCell(ansulXml, 'F10', data.inspection.attention, strings);
+        ansulXml = writeCell(ansulXml, 'F11', data.inspection.area, strings);
+        ansulXml = writeCell(ansulXml, 'F12', data.inspection.inspectionDate, strings);
+        const capacity = data.ansul.capacityGallons.trim();
+        ansulXml = writeCell(
+          ansulXml,
+          'A16',
+          capacity
+            ? `SISTEMA R-102 CON CAPACIDAD DE ${capacity} GALONES`
+            : 'SISTEMA R-102 CON CAPACIDAD DE ___ GALONES',
+          strings
+        );
+        const answers = new Map(data.ansul.answers.map((answer) => [answer.questionId, answer]));
+        for (const [questionId, cells] of Object.entries(ANSUL_QUESTION_CELLS)) {
+          const answer = answers.get(questionId);
+          if (!answer) continue;
+          if (answer.answer) {
+            const target = answer.answer === 'si'
+              ? cells.yesCell
+              : answer.answer === 'na' ? cells.naCell : cells.noCell;
+            ansulXml = writeCell(ansulXml, target, 'X', strings);
+          }
+          if (answer.quantity !== null && answer.quantity !== undefined && answer.quantity !== '') {
+            ansulXml = writeAnsulValue(ansulXml, cells.quantityCell, answer.quantity, strings, true);
+          }
+          if (answer.model !== null && answer.model !== undefined && answer.model !== '') {
+            ansulXml = writeAnsulValue(ansulXml, cells.modelCell, answer.model, strings);
+          }
+          if (answer.comment) ansulXml = writeCell(ansulXml, cells.commentCell, answer.comment, strings);
+        }
+        const wrapped = wrapAnsulObservations(data.ansul.observations);
+        if (!wrapped.valid) throw new Error(wrapped.message);
+        wrapped.lines.forEach((line, index) => {
+          if (line) ansulXml = writeCell(ansulXml!, `F${36 + index}`, line, strings);
+        });
+        cleanedSheets.set(ansulPath, ansulXml);
       }
 
       cleanedSheets.set(extPath, extXml);

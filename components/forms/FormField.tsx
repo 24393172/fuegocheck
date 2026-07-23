@@ -46,6 +46,7 @@ function FormFieldInner<T extends FieldValues>({ field, control, readOnly = fals
                 placeholder={field.label}
                 placeholderTextColor="#6b7280"
                 editable={!readOnly}
+                maxLength={field.maxLength}
               />
             )}
 
@@ -61,6 +62,7 @@ function FormFieldInner<T extends FieldValues>({ field, control, readOnly = fals
                 placeholderTextColor="#6b7280"
                 textAlignVertical="top"
                 editable={!readOnly}
+                maxLength={field.maxLength}
               />
             )}
 

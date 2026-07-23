@@ -10,7 +10,7 @@ import {
   TextInput,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useForm, FieldValues, useWatch } from 'react-hook-form';
+import { useForm, FieldValues, useWatch, Controller } from 'react-hook-form';
 import { Inspection, Photo } from '../../../types/inspection.types';
 import { FormSchema } from '../../../types/form.types';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
@@ -23,12 +23,28 @@ import {
   normalizeFirePumpsData,
 } from '../../../lib/fire-pumps';
 import { FirePumpFormData, FirePumpFormId } from '../../../types/fire-pump.types';
+import { AlarmPanelData } from '../../../types/alarm.types';
+import {
+  buildAlarmPanel,
+  normalizeAlarmsData,
+  panelToFlatValues,
+} from '../../../lib/alarms';
+import { tableroAdForm } from '../../../schemas';
 import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
 import SectionHeader from '../../../components/ui/SectionHeader';
 import { CatalogLocation } from '../../../types/catalog.types';
 import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
+import { AnsulData } from '../../../types/ansul.types';
+import {
+  ANSUL_FORMAT_ID,
+  ansulProgress,
+  ansulToFlatValues,
+  buildAnsulData,
+  normalizeAnsulData,
+} from '../../../lib/ansul';
+import { ansulR102Form } from '../../../schemas';
 
 // Photos are stored per pump so they don't collide between the pumps of one
 // inspection: the field_key is prefixed with the pump id (e.g. "diesel:photo_general").
@@ -75,6 +91,8 @@ export default function FillScreen() {
   // slice, so the other pumps and the site data are never overwritten.
   const fullDataRef = useRef<Record<string, unknown>>({});
   const firePumpFormRef = useRef<FirePumpFormData | null>(null);
+  const alarmPanelRef = useRef<AlarmPanelData | null>(null);
+  const ansulRef = useRef<AnsulData | null>(null);
 
   const { control, watch, reset, setValue, getValues } = useForm<FieldValues>({ defaultValues: {} });
   const watchedValues = useWatch({ control });
@@ -140,6 +158,28 @@ export default function FillScreen() {
             fullDataRef.current = fullData;
             await updateInspection(id, { form_data: JSON.stringify(fullData) });
           }
+        } else if (pump === 'tablero_ad') {
+          const normalized = normalizeAlarmsData(fullData, tableroAdForm);
+          alarmPanelRef.current = normalized.data.panel;
+          currentValues = panelToFlatValues(normalized.data.panel);
+          if (normalized.changed || !fullData.alarms) {
+            fullData.alarms = normalized.data;
+            fullDataRef.current = fullData;
+            await updateInspection(id, { form_data: JSON.stringify(fullData) });
+          }
+        } else if (pump === ANSUL_FORMAT_ID) {
+          const normalized = normalizeAnsulData(fullData, ansulR102Form);
+          ansulRef.current = normalized.data;
+          currentValues = ansulToFlatValues(normalized.data);
+          const nextPumps = { ...pumps };
+          const hadLegacySlice = Object.prototype.hasOwnProperty.call(nextPumps, ANSUL_FORMAT_ID);
+          delete nextPumps[ANSUL_FORMAT_ID];
+          if (normalized.changed || !fullData.ansul || hadLegacySlice) {
+            fullData.ansul = normalized.data;
+            fullData.pumps = nextPumps;
+            fullDataRef.current = fullData;
+            await updateInspection(id, { form_data: JSON.stringify(fullData) });
+          }
         } else {
           currentValues = { ...(pumps[pump] ?? {}) };
         }
@@ -197,6 +237,35 @@ export default function FillScreen() {
           [pump]: form,
         },
       };
+      return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });
+    }
+    if (schema && pump === 'tablero_ad') {
+      const normalized = normalizeAlarmsData(fullDataRef.current, tableroAdForm);
+      const panel = buildAlarmPanel(
+        schema,
+        values as Record<string, unknown>,
+        alarmPanelRef.current ?? normalized.data.panel
+      );
+      alarmPanelRef.current = panel;
+      fullDataRef.current = {
+        ...fullDataRef.current,
+        alarms: { ...normalized.data, panel },
+      };
+      return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });
+    }
+    if (schema && pump === ANSUL_FORMAT_ID) {
+      const normalized = normalizeAnsulData(fullDataRef.current, ansulR102Form);
+      const ansul = buildAnsulData(
+        schema,
+        values as Record<string, unknown>,
+        ansulRef.current ?? normalized.data
+      );
+      ansulRef.current = ansul;
+      const pumps = {
+        ...((fullDataRef.current.pumps ?? {}) as Record<string, Record<string, unknown>>),
+      };
+      delete pumps[ANSUL_FORMAT_ID];
+      fullDataRef.current = { ...fullDataRef.current, pumps, ansul };
       return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });
     }
     const pumps = (fullDataRef.current.pumps ?? {}) as Record<string, Record<string, unknown>>;
@@ -351,6 +420,43 @@ export default function FillScreen() {
       );
     }
 
+    if (pump === ANSUL_FORMAT_ID && field.type === 'yes_no_na') {
+      return (
+        <View key={field.key} style={styles.ansulQuestion}>
+          <FormField field={field} control={control} readOnly={isReadOnly} />
+          <View style={styles.ansulTechnicalRow}>
+            {([
+              [`${field.key}_quantity`, 'Cantidad'],
+              [`${field.key}_model`, 'Modelo'],
+            ] as const).map(([name, label]) => (
+              <Controller
+                key={name}
+                control={control}
+                name={name}
+                render={({ field: controllerField }) => (
+                  <View style={styles.ansulTechnicalField}>
+                    <Text style={styles.ansulTechnicalLabel}>{label} (opcional)</Text>
+                    <TextInput
+                      style={styles.ansulTechnicalInput}
+                      value={controllerField.value === undefined || controllerField.value === null
+                        ? ''
+                        : String(controllerField.value)}
+                      onChangeText={controllerField.onChange}
+                      onBlur={controllerField.onBlur}
+                      editable={!isReadOnly}
+                      maxLength={200}
+                      placeholder={label}
+                      placeholderTextColor="#94a3b8"
+                    />
+                  </View>
+                )}
+              />
+            ))}
+          </View>
+        </View>
+      );
+    }
+
     return <FormField key={field.key} field={field} control={control} readOnly={isReadOnly} />;
   }
 
@@ -364,7 +470,18 @@ export default function FillScreen() {
 
   if (!schema) return null;
 
-  const { filled, total } = computeProgress(schema, watchedValues, photosByKey);
+  const ansulDraft = pump === ANSUL_FORMAT_ID
+    ? buildAnsulData(
+      ansulR102Form,
+      watchedValues as Record<string, unknown>,
+      ansulRef.current ?? normalizeAnsulData(undefined, ansulR102Form).data,
+      ansulRef.current?.updatedAt ?? 0
+    )
+    : null;
+  const ansulFormProgress = ansulDraft ? ansulProgress(ansulR102Form, ansulDraft) : null;
+  const { filled, total } = ansulFormProgress
+    ? { filled: ansulFormProgress.answered, total: ansulFormProgress.total }
+    : computeProgress(schema, watchedValues, photosByKey);
   const progressPct = total > 0 ? Math.round((filled / total) * 100) : 0;
 
   return (
@@ -377,6 +494,13 @@ export default function FillScreen() {
         <Text style={styles.progressText}>
           {filled} / {total} campos{progressPct === 100 ? ' ✓' : ''}
         </Text>
+        {ansulFormProgress && (
+          <Text style={styles.ansulStatus}>
+            Estado: {ansulFormProgress.status === 'complete'
+              ? 'Completo'
+              : ansulFormProgress.status === 'in_progress' ? 'En progreso' : 'Sin iniciar'}
+          </Text>
+        )}
         {isReadOnly && <Text style={styles.readOnlyText}>Vista de solo lectura</Text>}
       </View>
 
@@ -519,5 +643,38 @@ const styles = StyleSheet.create({
   savingText: {
     color: '#ffffff',
     fontSize: 12,
+  },
+  ansulQuestion: {
+    backgroundColor: '#ffffff',
+  },
+  ansulTechnicalRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  ansulTechnicalField: {
+    flex: 1,
+    minWidth: 0,
+  },
+  ansulTechnicalLabel: {
+    color: '#64748b',
+    fontSize: 12,
+    marginBottom: 5,
+  },
+  ansulTechnicalInput: {
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    color: '#0f172a',
+    backgroundColor: '#ffffff',
+  },
+  ansulStatus: {
+    marginTop: 4,
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

@@ -26,10 +26,23 @@ import { getInspection, updateInspection, updateOfficialReport, updateStatus, up
 import { getSignaturesByInspection } from '../../../lib/repositories/signatures.repo';
 import { deletePhoto, getPhotosByInspection, markPhotoError, markPhotoSynced, markPhotoUploading } from '../../../lib/repositories/photos.repo';
 import { deletePhotoFiles } from '../../../lib/photo-manager';
-import { PUMP_SCHEMAS } from '../../../schemas';
+import { PUMP_SCHEMAS, ansulR102Form, tableroAdForm } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
 import { Inspection, Signature } from '../../../types/inspection.types';
 import { FirePumpsData } from '../../../types/fire-pump.types';
+import { AlarmsData, AlarmMobileFormId } from '../../../types/alarm.types';
+import { AnsulData } from '../../../types/ansul.types';
+import {
+  ALARM_DEVICE_KEYS,
+  ALARM_FORM_LABELS,
+  ALARM_MOBILE_IDS,
+  alarmMissingFields,
+  alarmPayload,
+  buildAlarmPanel,
+  deriveDeviceStatus,
+  derivePanelStatus,
+  normalizeAlarmsData,
+} from '../../../lib/alarms';
 import {
   firePumpPayloadForms,
   firePumpProgress,
@@ -45,6 +58,12 @@ import {
   syncInspection,
   uploadInspectionEvidence,
 } from '../../../services/local-server-api';
+import {
+  ANSUL_FORMAT_ID,
+  ansulPayload,
+  ansulProgress,
+  normalizeAnsulData,
+} from '../../../lib/ansul';
 
 function formatProgress(schema: FormSchema, data: Record<string, unknown>) {
   if (schema.id === 'extintores') {
@@ -90,6 +109,12 @@ export default function InspectionIndexScreen() {
   const [firePumps, setFirePumps] = useState<FirePumpsData>(
     () => normalizeFirePumpsData(undefined).data
   );
+  const [alarms, setAlarms] = useState<AlarmsData>(
+    () => normalizeAlarmsData(undefined, tableroAdForm).data
+  );
+  const [ansul, setAnsul] = useState<AnsulData>(
+    () => normalizeAnsulData(undefined, ansulR102Form).data
+  );
   const [signature, setSignature] = useState<Signature | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingComment, setPendingComment] = useState('');
@@ -114,13 +139,24 @@ export default function InspectionIndexScreen() {
           }
           const data = parseFormData(insp);
           const normalizedFirePumps = normalizeFirePumpsData(data);
+          const normalizedAlarms = normalizeAlarmsData(data, tableroAdForm);
+          const normalizedAnsul = normalizeAnsulData(data, ansulR102Form);
           const selectedIds = normalizeSelectedFormatIds(data.selectedFormatIds);
           const hasSelectedFirePumps = PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id));
+          const hasSelectedAlarms = ALARM_MOBILE_IDS.some((formId) => selectedIds.includes(formId));
+          const hasSelectedAnsul = selectedIds.includes(ANSUL_FORMAT_ID);
           let loadedInspection = insp;
-          if (hasSelectedFirePumps && (!data.firePumps || normalizedFirePumps.changed)) {
+          if ((hasSelectedFirePumps && (!data.firePumps || normalizedFirePumps.changed))
+              || (hasSelectedAlarms && (!data.alarms || normalizedAlarms.changed))
+              || (hasSelectedAnsul && (!data.ansul || normalizedAnsul.changed))) {
+            const normalizedPumps = { ...((data.pumps ?? {}) as Record<string, unknown>) };
+            if (hasSelectedAnsul) delete normalizedPumps[ANSUL_FORMAT_ID];
             const normalizedFormData = JSON.stringify({
               ...data,
-              firePumps: normalizedFirePumps.data,
+              pumps: normalizedPumps,
+              ...(hasSelectedFirePumps ? { firePumps: normalizedFirePumps.data } : {}),
+              ...(hasSelectedAlarms ? { alarms: normalizedAlarms.data } : {}),
+              ...(hasSelectedAnsul ? { ansul: normalizedAnsul.data } : {}),
             });
             await updateInspection(id, { form_data: normalizedFormData });
             loadedInspection = await getInspection(id) ?? { ...insp, form_data: normalizedFormData };
@@ -129,6 +165,8 @@ export default function InspectionIndexScreen() {
           setPendingComment(insp.pending_comment ?? '');
           setPumpsData((data.pumps ?? {}) as Record<string, Record<string, unknown>>);
           setFirePumps(normalizedFirePumps.data);
+          setAlarms(normalizedAlarms.data);
+          setAnsul(normalizedAnsul.data);
           setSignature(sigs.find((item) => item.signer_type === 'technician') ?? null);
         } catch (error) {
           console.error('[inspection] Failed to load:', error);
@@ -150,6 +188,41 @@ export default function InspectionIndexScreen() {
         firePumps[schema.id as keyof FirePumpsData]
       );
     }
+    if (schema.id === 'tablero_ad') {
+      const formStatus = alarms.panel.status === 'not_applicable'
+        ? 'not_applicable' : derivePanelStatus(tableroAdForm, alarms.panel);
+      const answered = Object.values(alarms.panel.answers).filter((answer) => answer.answer).length;
+      const total = tableroAdForm.sections.flatMap((section) => section.fields)
+        .filter((field) => field.type === 'yes_no_na').length;
+      return {
+        total, answered,
+        hasAnyData: formStatus !== 'not_started',
+        complete: formStatus === 'complete' || formStatus === 'not_applicable',
+        missing: formStatus === 'complete' || formStatus === 'not_applicable'
+          ? [] : alarmMissingFields(alarms, tableroAdForm).filter((item) => item.startsWith('Tablero')),
+      };
+    }
+    if (ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId)) {
+      const key = ALARM_DEVICE_KEYS[schema.id as keyof typeof ALARM_DEVICE_KEYS];
+      const collection = alarms[key];
+      const formStatus = deriveDeviceStatus(collection);
+      const complete = formStatus === 'not_applicable'
+        || (formStatus === 'complete' && Boolean(alarms.systemName.trim()));
+      return {
+        total: collection.items.length,
+        answered: collection.items.filter((item) =>
+          [item.identifier, item.loop, item.deviceType, item.locationNameSnapshot].every((value) => value.trim())
+          && [item.alarm, item.supervision, item.cleaning].every(Boolean)
+        ).length,
+        hasAnyData: formStatus !== 'not_started',
+        complete,
+        missing: complete ? [] : alarmMissingFields(alarms, tableroAdForm)
+          .filter((item) => item.startsWith(ALARM_FORM_LABELS[schema.id as AlarmMobileFormId])),
+      };
+    }
+    if (schema.id === ANSUL_FORMAT_ID) {
+      return ansulProgress(ansulR102Form, ansul);
+    }
     return {
       ...formatProgress(schema, pumpsData[schema.id] ?? {}),
       missing: [] as string[],
@@ -167,6 +240,12 @@ export default function InspectionIndexScreen() {
         ...fullData,
         selectedFormatIds: nextIds,
         pumps: fullData.pumps ?? {},
+        ...(option.templateType === 'alarm'
+          ? { alarms: normalizeAlarmsData(fullData, tableroAdForm).data }
+          : {}),
+        ...(option.schemaIds.includes(ANSUL_FORMAT_ID)
+          ? { ansul: normalizeAnsulData(fullData, ansulR102Form).data }
+          : {}),
       });
 
       await updateInspection(id, { form_data: nextFormData });
@@ -181,6 +260,50 @@ export default function InspectionIndexScreen() {
       Alert.alert('Error', 'No se pudo agregar el formato. Intenta de nuevo.');
     } finally {
       setIsAddingFormat(false);
+    }
+  }
+
+  async function saveAlarmSystemName(value: string) {
+    if (!inspection) return;
+    const nextName = value.trim();
+    const fullData = parseFormData(inspection);
+    const normalized = normalizeAlarmsData(fullData, tableroAdForm);
+    if (normalized.data.systemName === nextName) return;
+    normalized.data.systemName = nextName;
+    const nextFormData = JSON.stringify({ ...fullData, alarms: normalized.data });
+    await updateInspection(id, { form_data: nextFormData });
+    setAlarms(normalized.data);
+    setInspection((current) => current ? { ...current, form_data: nextFormData, updated_at: Date.now() } : current);
+  }
+
+  async function toggleAlarmApplicability(formId: AlarmMobileFormId) {
+    if (!inspection) return;
+    try {
+      const fullData = parseFormData(inspection);
+      const normalized = normalizeAlarmsData(fullData, tableroAdForm);
+      if (formId === 'tablero_ad') {
+        normalized.data.panel.status = normalized.data.panel.status === 'not_applicable'
+          ? derivePanelStatus(tableroAdForm, { ...normalized.data.panel, status: 'not_started' })
+          : 'not_applicable';
+        normalized.data.panel.updatedAt = Date.now();
+      } else {
+        const key = ALARM_DEVICE_KEYS[formId];
+        const collection = normalized.data[key];
+        normalized.data[key] = {
+          ...collection,
+          status: collection.status === 'not_applicable'
+            ? deriveDeviceStatus({ ...collection, status: 'not_started' })
+            : 'not_applicable',
+          updatedAt: Date.now(),
+        };
+      }
+      const nextFormData = JSON.stringify({ ...fullData, alarms: normalized.data });
+      await updateInspection(id, { form_data: nextFormData });
+      setAlarms(normalized.data);
+      setInspection((current) => current ? { ...current, form_data: nextFormData, updated_at: Date.now() } : current);
+    } catch (error) {
+      console.error('[inspection] Could not change alarm applicability:', error);
+      Alert.alert('Error', 'No se pudo cambiar la aplicabilidad del formulario.');
     }
   }
 
@@ -269,6 +392,20 @@ export default function InspectionIndexScreen() {
         fullData.firePumps = normalizedFirePumps.data;
         normalizationChanged = normalizationChanged || normalizedFirePumps.changed;
       }
+      const normalizedAlarms = normalizeAlarmsData(fullData, tableroAdForm);
+      if (ALARM_MOBILE_IDS.some((formId) => selectedIds.includes(formId))) {
+        fullData.alarms = normalizedAlarms.data;
+        normalizationChanged = normalizationChanged || normalizedAlarms.changed;
+      }
+      const normalizedAnsul = normalizeAnsulData(fullData, ansulR102Form);
+      if (selectedIds.includes(ANSUL_FORMAT_ID)) {
+        fullData.ansul = normalizedAnsul.data;
+        if (Object.prototype.hasOwnProperty.call(normalizedPumps, ANSUL_FORMAT_ID)) {
+          delete normalizedPumps[ANSUL_FORMAT_ID];
+          normalizationChanged = true;
+        }
+        normalizationChanged = normalizationChanged || normalizedAnsul.changed;
+      }
       if (normalizationChanged) {
         const normalizedFormData = JSON.stringify({
           ...fullData,
@@ -314,6 +451,12 @@ export default function InspectionIndexScreen() {
           ? normalizeHydrantsData(currentPumps.hidrantes).collection.items : undefined,
         firePumps: PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id))
           ? firePumpPayloadForms(normalizeFirePumpsData(fullData).data)
+          : undefined,
+        alarms: ALARM_MOBILE_IDS.some((formId) => selectedIds.includes(formId))
+          ? alarmPayload(normalizeAlarmsData(fullData, tableroAdForm).data)
+          : undefined,
+        ansul: selectedIds.includes(ANSUL_FORMAT_ID)
+          ? ansulPayload(normalizeAnsulData(fullData, ansulR102Form).data)
           : undefined,
         signature: signature ? {
           mimeType: 'image/png',
@@ -424,8 +567,14 @@ export default function InspectionIndexScreen() {
   const schemas = schemasForSelectedFormatIds(selectedFormatIds);
   const pumpIds = new Set(PUMP_SCHEMAS.map((schema) => schema.id));
   const pumpSchemas = schemas.filter((schema) => pumpIds.has(schema.id));
-  const otherSchemas = schemas.filter((schema) => !pumpIds.has(schema.id));
+  const alarmSchemas = schemas.filter((schema) =>
+    ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId)
+  );
+  const otherSchemas = schemas.filter((schema) =>
+    !pumpIds.has(schema.id) && !ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId)
+  );
   const completedPumpForms = pumpSchemas.filter((schema) => getFormatProgress(schema).complete).length;
+  const completedAlarmForms = alarmSchemas.filter((schema) => getFormatProgress(schema).complete).length;
   const includesExtinguishers = selectedFormatIds.includes('extintores');
   const includesHydrants = selectedFormatIds.includes('hidrantes');
   const progress = schemas.map((schema) => getFormatProgress(schema));
@@ -441,7 +590,14 @@ export default function InspectionIndexScreen() {
 
   function renderFormatCard(schema: FormSchema) {
     const item = getFormatProgress(schema);
-    const statusText = !item.hasAnyData
+    const alarmStatus = schema.id === 'tablero_ad'
+      ? alarms.panel.status
+      : ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId)
+        ? alarms[ALARM_DEVICE_KEYS[schema.id as keyof typeof ALARM_DEVICE_KEYS]].status
+        : null;
+    const statusText = alarmStatus === 'not_applicable'
+      ? 'No aplica'
+      : !item.hasAnyData
       ? 'Sin empezar'
       : item.complete
         ? `Completa · ${item.answered}/${item.total}`
@@ -461,6 +617,10 @@ export default function InspectionIndexScreen() {
             router.push(`/inspection/${id}/hydrants${locked ? '?readonly=1' : ''}`);
             return;
           }
+          if (ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId) && schema.id !== 'tablero_ad') {
+            router.push(`/inspection/${id}/alarm-devices?form=${schema.id}${locked ? '&readonly=1' : ''}`);
+            return;
+          }
           router.push(`/inspection/${id}/fill?pump=${schema.id}${locked ? '&readonly=1' : ''}`);
         }}
         activeOpacity={0.7}
@@ -474,6 +634,22 @@ export default function InspectionIndexScreen() {
           size={21}
           color={item.complete ? '#16a34a' : '#94a3b8'}
         />
+        {!locked && ALARM_MOBILE_IDS.includes(schema.id as AlarmMobileFormId) && (
+          <TouchableOpacity
+            style={styles.notApplicableButton}
+            onPress={(event) => {
+              event.stopPropagation();
+              toggleAlarmApplicability(schema.id as AlarmMobileFormId);
+            }}
+            accessibilityLabel={alarmStatus === 'not_applicable'
+              ? 'Marcar formulario como aplicable'
+              : 'Marcar formulario como no aplica'}
+          >
+            <Text style={styles.notApplicableText}>
+              {alarmStatus === 'not_applicable' ? 'Aplicar' : 'No aplica'}
+            </Text>
+          </TouchableOpacity>
+        )}
       </TouchableOpacity>
     );
   }
@@ -504,6 +680,42 @@ export default function InspectionIndexScreen() {
               </View>
             </View>
             {pumpSchemas.map(renderFormatCard)}
+          </View>
+        )}
+        {alarmSchemas.length > 0 && (
+          <View style={styles.alarmGroup}>
+            <View style={styles.groupHeader}>
+              <Ionicons name="notifications" size={18} color="#6d28d9" />
+              <View style={styles.alarmHeaderCopy}>
+                <Text style={styles.alarmGroupTitle}>Alarmas y detección</Text>
+                <Text style={styles.groupProgress}>
+                  {completedAlarmForms} de {alarmSchemas.length} formularios completos
+                </Text>
+              </View>
+            </View>
+            <View style={styles.systemBox}>
+              <Text style={styles.systemLabel}>Sistema compartido</Text>
+              <TextInput
+                style={styles.systemInput}
+                editable={!locked}
+                value={alarms.systemName}
+                onChangeText={(value) => setAlarms((current) => ({ ...current, systemName: value }))}
+                onEndEditing={(event) => {
+                  saveAlarmSystemName(event.nativeEvent.text).catch((error) => {
+                    console.error('[inspection] Could not save alarm system:', error);
+                    Alert.alert('Error', 'No se pudo guardar el sistema.');
+                  });
+                }}
+                placeholder="Ej. NOTIFIER 2020"
+                placeholderTextColor="#94a3b8"
+              />
+              {!!alarms.systemNameDiscrepancies.length && (
+                <Text style={styles.discrepancyText}>
+                  Se conservaron {alarms.systemNameDiscrepancies.length} valor(es) histórico(s) diferentes para revisión.
+                </Text>
+              )}
+            </View>
+            {alarmSchemas.map(renderFormatCard)}
           </View>
         )}
         {otherSchemas.map(renderFormatCard)}
@@ -619,13 +831,22 @@ const styles = StyleSheet.create({
   overallBadgeText: { color: '#334155', fontSize: 11, fontWeight: '700' },
   sectionLabel: { fontSize: 12, fontWeight: '600', color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 10 },
   formatGroup: { padding: 10, gap: 8, borderRadius: 14, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe' },
+  alarmGroup: { padding: 10, gap: 8, borderRadius: 14, backgroundColor: '#faf5ff', borderWidth: 1, borderColor: '#d8b4fe' },
   groupHeader: { paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  alarmHeaderCopy: { flex: 1 },
   groupTitle: { color: '#1e3a5f', fontSize: 14, fontWeight: '800' },
+  alarmGroupTitle: { color: '#4c1d95', fontSize: 14, fontWeight: '800' },
   groupProgress: { color: '#64748b', fontSize: 12, marginTop: 2 },
+  systemBox: { gap: 6, padding: 10, borderRadius: 11, backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#e9d5ff' },
+  systemLabel: { color: '#4c1d95', fontSize: 13, fontWeight: '800' },
+  systemInput: { minHeight: 44, borderWidth: 1, borderColor: '#c4b5fd', borderRadius: 9, paddingHorizontal: 11, color: '#1e293b', backgroundColor: '#ffffff' },
+  discrepancyText: { color: '#b45309', fontSize: 11, lineHeight: 16 },
   formatRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 12, borderWidth: 1, borderColor: '#e5e7eb', padding: 14 },
   formatInfo: { flex: 1 },
   formatName: { fontSize: 15, fontWeight: '600', color: '#111827' },
   formatStatus: { fontSize: 13, marginTop: 2 },
+  notApplicableButton: { minHeight: 36, justifyContent: 'center', paddingHorizontal: 8 },
+  notApplicableText: { color: '#6d28d9', fontSize: 11, fontWeight: '800' },
   addFormatButton: { minHeight: 58, borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#94a3b8', borderRadius: 12, backgroundColor: '#ffffff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
   addFormatText: { color: '#1f3f66', fontSize: 15, fontWeight: '800' },
   signatureBox: { backgroundColor: '#ffffff', borderRadius: 12, borderWidth: 1, borderColor: '#e5e7eb', padding: 14 },

@@ -105,7 +105,9 @@ export async function initializeDatabase(): Promise<void> {
       id TEXT PRIMARY KEY,
       company_id TEXT NOT NULL REFERENCES catalog_companies(id),
       branch_id TEXT REFERENCES catalog_branches(id),
-      equipment_type TEXT NOT NULL CHECK (equipment_type IN ('extinguisher', 'hydrant')),
+      equipment_type TEXT NOT NULL CHECK (equipment_type IN (
+        'extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'
+      )),
       name TEXT NOT NULL,
       area TEXT NOT NULL DEFAULT '',
       floor TEXT NOT NULL DEFAULT '',
@@ -153,6 +155,44 @@ export async function initializeDatabase(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_catalog_locations_branch_type
       ON catalog_locations(branch_id, equipment_type, active, name);
   `);
+
+  const versionRow = await database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+  if ((versionRow?.user_version ?? 0) < 9) {
+    const locationSql = await database.getFirstAsync<{ sql: string }>(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'catalog_locations'`
+    );
+    if (locationSql?.sql && !locationSql.sql.includes('addressed_device')) {
+      await database.withExclusiveTransactionAsync(async (transaction) => {
+        await transaction.execAsync(`
+          CREATE TABLE catalog_locations_v9 (
+            id TEXT PRIMARY KEY,
+            company_id TEXT NOT NULL REFERENCES catalog_companies(id),
+            branch_id TEXT REFERENCES catalog_branches(id),
+            equipment_type TEXT NOT NULL CHECK (equipment_type IN (
+              'extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'
+            )),
+            name TEXT NOT NULL,
+            area TEXT NOT NULL DEFAULT '',
+            floor TEXT NOT NULL DEFAULT '',
+            reference TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+            server_updated_at TEXT NOT NULL,
+            synced_at INTEGER NOT NULL
+          );
+          INSERT INTO catalog_locations_v9
+            SELECT id, company_id, branch_id, equipment_type, name, area, floor, reference,
+                   active, server_updated_at, synced_at
+            FROM catalog_locations;
+          DROP TABLE catalog_locations;
+          ALTER TABLE catalog_locations_v9 RENAME TO catalog_locations;
+          CREATE INDEX idx_catalog_locations_company_type
+            ON catalog_locations(company_id, equipment_type, active, name);
+          CREATE INDEX idx_catalog_locations_branch_type
+            ON catalog_locations(branch_id, equipment_type, active, name);
+        `);
+      });
+    }
+  }
 
   const inspectionColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(inspections)');
   const photoColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(photos)');
@@ -252,5 +292,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 8;');
+  await database.execAsync('PRAGMA user_version = 9;');
 }

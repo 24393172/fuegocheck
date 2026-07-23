@@ -75,6 +75,16 @@ export default function PhotoField({
           : pumpPrefix === 'diesel'
             ? 'pump_diesel'
             : null;
+      const alarmFormType = pumpPrefix === 'tablero_ad'
+        ? 'alarm_panel'
+        : pumpPrefix === 'dispositivos_ad'
+          ? 'addressed_devices'
+          : pumpPrefix === 'dispositivos_convencionales'
+            ? 'conventional_devices'
+            : pumpPrefix === 'dispositivos_notificacion'
+              ? 'notification_devices'
+              : null;
+      const isAnsul = pumpPrefix === 'ansul_r102';
       const saved = await addPhoto({
         id: photoId,
         inspection_id: inspectionId,
@@ -82,8 +92,8 @@ export default function PhotoField({
         local_uri: localUri,
         thumbnail_uri: thumbnailUri,
         caption: null,
-        format_type: pumpFormType ? 'fire_pumps' : pumpPrefix ?? 'legacy',
-        form_type: pumpFormType,
+        format_type: pumpFormType ? 'fire_pumps' : alarmFormType ? 'alarms' : isAnsul ? 'ansul' : pumpPrefix ?? 'legacy',
+        form_type: pumpFormType ?? alarmFormType,
         item_id: null,
         location_name_snapshot: null,
         legacy: !fieldKey.includes(':'),

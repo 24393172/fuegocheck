@@ -23,6 +23,8 @@ export interface SiteFormData {
   selectedFormatIds?: string[];
   pumps: Record<string, Record<string, unknown>>;
   firePumps?: FirePumpsData;
+  alarms?: AlarmsData;
+  ansul?: AnsulData;
 }
 
 // form_type / form_version for the multi-pump site inspection.
@@ -77,7 +79,9 @@ export interface Photo {
   created_at: number;
   updated_at: number;
   format_type: string;
-  form_type: 'pump_jockey' | 'pump_electric' | 'pump_diesel' | null;
+  form_type: 'pump_jockey' | 'pump_electric' | 'pump_diesel'
+    | 'alarm_panel' | 'addressed_devices' | 'conventional_devices'
+    | 'notification_devices' | null;
   item_id: string | null;
   location_name_snapshot: string | null;
   sync_status: 'pending' | 'uploading' | 'synced' | 'error';
@@ -97,3 +101,5 @@ export interface Signature {
   signed_at: number;
 }
 import type { FirePumpsData } from './fire-pump.types';
+import type { AlarmsData } from './alarm.types';
+import type { AnsulData } from './ansul.types';

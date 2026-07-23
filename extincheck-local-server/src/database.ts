@@ -8,6 +8,8 @@ import {
   InspectionSyncPayload,
 } from './validation.js';
 import { FIRE_PUMP_CONFIG, FIRE_PUMP_MOBILE_IDS } from './fire-pump-config.js';
+import { ALARM_FORM_TYPES, ALARM_MOBILE_IDS } from './alarm-config.js';
+import { ANSUL_FORMAT_ID } from './ansul-config.js';
 
 export class LocalDatabase {
   private readonly database: DatabaseSync;
@@ -32,7 +34,9 @@ export class LocalDatabase {
         updated_at TEXT NOT NULL,
         source_device_id TEXT,
         sync_version INTEGER NOT NULL,
-        selected_format_ids TEXT NOT NULL DEFAULT '[]'
+        selected_format_ids TEXT NOT NULL DEFAULT '[]',
+        alarm_system_name TEXT NOT NULL DEFAULT '',
+        alarm_system_discrepancies TEXT NOT NULL DEFAULT '[]'
       );
 
       CREATE TABLE IF NOT EXISTS extinguishers (
@@ -99,9 +103,16 @@ export class LocalDatabase {
       CREATE TABLE IF NOT EXISTS inspection_forms (
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
-        form_type TEXT NOT NULL CHECK (form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')),
+        form_type TEXT NOT NULL CHECK (form_type IN (
+          'pump_jockey', 'pump_electric', 'pump_diesel', 'alarm_panel',
+          'addressed_devices', 'conventional_devices', 'notification_devices',
+          'ansul_r102'
+        )),
         status TEXT NOT NULL CHECK (status IN ('not_started', 'in_progress', 'complete', 'not_applicable')),
         observations TEXT NOT NULL,
+        system_name TEXT NOT NULL DEFAULT '',
+        capacity_gallons TEXT NOT NULL DEFAULT '',
+        normalization_issues TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (inspection_id, form_type)
@@ -117,6 +128,8 @@ export class LocalDatabase {
         answer TEXT CHECK (answer IS NULL OR answer IN ('si', 'no', 'na')),
         parameter_value TEXT,
         reading_value,
+        quantity_value TEXT,
+        model_value TEXT,
         comment TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -125,6 +138,31 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_inspection_answers_form
       ON inspection_answers(form_id);
+
+      CREATE TABLE IF NOT EXISTS inspection_items (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        form_type TEXT NOT NULL CHECK (form_type IN (
+          'addressed_devices', 'conventional_devices', 'notification_devices'
+        )),
+        item_id TEXT NOT NULL UNIQUE,
+        location_id TEXT,
+        location_name_snapshot TEXT NOT NULL,
+        custom_location INTEGER NOT NULL CHECK (custom_location IN (0, 1)),
+        identifier TEXT NOT NULL,
+        loop TEXT NOT NULL,
+        device_type TEXT NOT NULL,
+        alarm TEXT CHECK (alarm IS NULL OR alarm IN ('si', 'no', 'na')),
+        supervision TEXT CHECK (supervision IS NULL OR supervision IN ('si', 'no', 'na')),
+        cleaning TEXT CHECK (cleaning IS NULL OR cleaning IN ('si', 'no', 'na')),
+        observations TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (inspection_id, form_type, item_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_items_inspection
+      ON inspection_items(inspection_id, form_type);
 
       CREATE TABLE IF NOT EXISTS inspection_signatures (
         id TEXT PRIMARY KEY,
@@ -194,6 +232,15 @@ export class LocalDatabase {
     this.ensureColumn('inspections', 'attention', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('inspections', 'area', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('inspections', 'selected_format_ids', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('inspections', 'alarm_system_name', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('inspections', 'alarm_system_discrepancies', "TEXT NOT NULL DEFAULT '[]'");
+    this.migrateInspectionFormsForAlarms();
+    this.ensureColumn('inspection_forms', 'system_name', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('inspection_forms', 'capacity_gallons', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('inspection_forms', 'normalization_issues', "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn('inspection_answers', 'quantity_value', 'TEXT');
+    this.ensureColumn('inspection_answers', 'model_value', 'TEXT');
+    this.migrateInspectionFormsForAnsul();
     this.ensureColumn('generated_reports', 'last_attempt_at', 'TEXT');
     this.ensureColumn('generated_reports', 'last_attempt_status', 'TEXT');
     this.ensureColumn('generated_reports', 'last_attempt_error', 'TEXT');
@@ -241,6 +288,137 @@ export class LocalDatabase {
     }
   }
 
+  private migrateInspectionFormsForAlarms() {
+    const row = this.database.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inspection_forms'`
+    ).get() as { sql: string } | undefined;
+    if (!row?.sql || row.sql.includes('alarm_panel')) return;
+    this.database.exec('PRAGMA foreign_keys = OFF;');
+    try {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        DROP INDEX IF EXISTS idx_inspection_answers_form;
+        DROP INDEX IF EXISTS idx_inspection_forms_inspection;
+        ALTER TABLE inspection_answers RENAME TO inspection_answers_pre_alarms;
+        ALTER TABLE inspection_forms RENAME TO inspection_forms_pre_alarms;
+        CREATE TABLE inspection_forms (
+          id TEXT PRIMARY KEY,
+          inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+          form_type TEXT NOT NULL CHECK (form_type IN (
+            'pump_jockey', 'pump_electric', 'pump_diesel', 'alarm_panel',
+            'addressed_devices', 'conventional_devices', 'notification_devices'
+          )),
+          status TEXT NOT NULL CHECK (status IN ('not_started', 'in_progress', 'complete', 'not_applicable')),
+          observations TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (inspection_id, form_type)
+        );
+        INSERT INTO inspection_forms
+          SELECT id, inspection_id, form_type, status, observations, created_at, updated_at
+          FROM inspection_forms_pre_alarms;
+        CREATE TABLE inspection_answers (
+          id TEXT PRIMARY KEY,
+          form_id TEXT NOT NULL REFERENCES inspection_forms(id) ON DELETE CASCADE,
+          question_id TEXT NOT NULL,
+          answer TEXT CHECK (answer IS NULL OR answer IN ('si', 'no', 'na')),
+          parameter_value TEXT,
+          reading_value,
+          comment TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (form_id, question_id)
+        );
+        INSERT INTO inspection_answers
+          SELECT id, form_id, question_id, answer, parameter_value, reading_value,
+                 comment, created_at, updated_at
+          FROM inspection_answers_pre_alarms;
+        DROP TABLE inspection_answers_pre_alarms;
+        DROP TABLE inspection_forms_pre_alarms;
+        CREATE INDEX idx_inspection_forms_inspection ON inspection_forms(inspection_id);
+        CREATE INDEX idx_inspection_answers_form ON inspection_answers(form_id);
+        COMMIT;
+      `);
+    } catch (error) {
+      try { this.database.exec('ROLLBACK;'); } catch { /* transaction may already be closed */ }
+      throw error;
+    } finally {
+      this.database.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
+
+  private migrateInspectionFormsForAnsul() {
+    const row = this.database.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inspection_forms'`
+    ).get() as { sql: string } | undefined;
+    if (!row?.sql || row.sql.includes("'ansul_r102'")) return;
+    this.database.exec('PRAGMA foreign_keys = OFF;');
+    try {
+      this.database.exec(`
+        BEGIN IMMEDIATE;
+        DROP INDEX IF EXISTS idx_inspection_answers_form;
+        DROP INDEX IF EXISTS idx_inspection_forms_inspection;
+        ALTER TABLE inspection_answers RENAME TO inspection_answers_pre_ansul;
+        ALTER TABLE inspection_forms RENAME TO inspection_forms_pre_ansul;
+        CREATE TABLE inspection_forms (
+          id TEXT PRIMARY KEY,
+          inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+          form_type TEXT NOT NULL CHECK (form_type IN (
+            'pump_jockey', 'pump_electric', 'pump_diesel', 'alarm_panel',
+            'addressed_devices', 'conventional_devices', 'notification_devices',
+            'ansul_r102'
+          )),
+          status TEXT NOT NULL CHECK (status IN ('not_started', 'in_progress', 'complete', 'not_applicable')),
+          observations TEXT NOT NULL,
+          system_name TEXT NOT NULL DEFAULT '',
+          capacity_gallons TEXT NOT NULL DEFAULT '',
+          normalization_issues TEXT NOT NULL DEFAULT '[]',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (inspection_id, form_type)
+        );
+        INSERT INTO inspection_forms (
+          id, inspection_id, form_type, status, observations, system_name,
+          capacity_gallons, normalization_issues, created_at, updated_at
+        )
+        SELECT id, inspection_id, form_type, status, observations, system_name,
+               capacity_gallons, normalization_issues, created_at, updated_at
+        FROM inspection_forms_pre_ansul;
+        CREATE TABLE inspection_answers (
+          id TEXT PRIMARY KEY,
+          form_id TEXT NOT NULL REFERENCES inspection_forms(id) ON DELETE CASCADE,
+          question_id TEXT NOT NULL,
+          answer TEXT CHECK (answer IS NULL OR answer IN ('si', 'no', 'na')),
+          parameter_value TEXT,
+          reading_value,
+          quantity_value TEXT,
+          model_value TEXT,
+          comment TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (form_id, question_id)
+        );
+        INSERT INTO inspection_answers (
+          id, form_id, question_id, answer, parameter_value, reading_value,
+          quantity_value, model_value, comment, created_at, updated_at
+        )
+        SELECT id, form_id, question_id, answer, parameter_value, reading_value,
+               quantity_value, model_value, comment, created_at, updated_at
+        FROM inspection_answers_pre_ansul;
+        DROP TABLE inspection_answers_pre_ansul;
+        DROP TABLE inspection_forms_pre_ansul;
+        CREATE INDEX idx_inspection_forms_inspection ON inspection_forms(inspection_id);
+        CREATE INDEX idx_inspection_answers_form ON inspection_answers(form_id);
+        COMMIT;
+      `);
+    } catch (error) {
+      try { this.database.exec('ROLLBACK;'); } catch { /* transaction may already be closed */ }
+      throw error;
+    } finally {
+      this.database.exec('PRAGMA foreign_keys = ON;');
+    }
+  }
+
   beginSync() { this.database.exec('BEGIN IMMEDIATE;'); }
   commitSync() { this.database.exec('COMMIT;'); }
   rollbackSync() { this.database.exec('ROLLBACK;'); }
@@ -262,7 +440,20 @@ export class LocalDatabase {
       this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(inspectionId);
     }
     if (!FIRE_PUMP_MOBILE_IDS.some((id) => selectedIds.includes(id))) {
-      this.database.prepare('DELETE FROM inspection_forms WHERE inspection_id = ?').run(inspectionId);
+      this.database.prepare(`DELETE FROM inspection_forms WHERE inspection_id = ?
+        AND form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')`).run(inspectionId);
+    }
+    if (!ALARM_MOBILE_IDS.some((id) => selectedIds.includes(id))) {
+      this.database.prepare(`DELETE FROM inspection_forms WHERE inspection_id = ?
+        AND form_type IN ('alarm_panel', 'addressed_devices', 'conventional_devices', 'notification_devices')`)
+        .run(inspectionId);
+      this.database.prepare('DELETE FROM inspection_items WHERE inspection_id = ?').run(inspectionId);
+      this.database.prepare(`UPDATE inspections SET alarm_system_name = '', alarm_system_discrepancies = '[]'
+        WHERE id = ?`).run(inspectionId);
+    }
+    if (!selectedIds.includes(ANSUL_FORMAT_ID)) {
+      this.database.prepare(`DELETE FROM inspection_forms WHERE inspection_id = ?
+        AND form_type = 'ansul_r102'`).run(inspectionId);
     }
   }
 
@@ -320,6 +511,136 @@ export class LocalDatabase {
       }
     }
   }
+
+  upsertAlarmForms(payload: InspectionSyncPayload) {
+    if (!payload.alarms) return;
+    const now = new Date().toISOString();
+    this.database.prepare(`UPDATE inspections SET alarm_system_name = ?,
+      alarm_system_discrepancies = ? WHERE id = ?`).run(
+      payload.alarms.systemName,
+      JSON.stringify(payload.alarms.systemNameDiscrepancies),
+      payload.inspectionId
+    );
+    const getExisting = this.database.prepare(
+      'SELECT id, created_at AS createdAt FROM inspection_forms WHERE inspection_id = ? AND form_type = ?'
+    );
+    const upsertForm = this.database.prepare(`
+      INSERT INTO inspection_forms (
+        id, inspection_id, form_type, status, observations, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inspection_id, form_type) DO UPDATE SET
+        status=excluded.status, observations=excluded.observations, updated_at=excluded.updated_at
+    `);
+    const deleteAnswers = this.database.prepare('DELETE FROM inspection_answers WHERE form_id = ?');
+    const insertAnswer = this.database.prepare(`INSERT INTO inspection_answers (
+      id, form_id, question_id, answer, parameter_value, reading_value,
+      comment, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const forms = [
+      payload.alarms.panel,
+      payload.alarms.addressedDevices,
+      payload.alarms.conventionalDevices,
+      payload.alarms.notificationDevices,
+    ];
+    for (const form of forms) {
+      const existing = getExisting.get(payload.inspectionId, form.formType) as
+        { id: string; createdAt: string } | undefined;
+      const formId = existing?.id ?? randomUUID();
+      const updatedAt = new Date(form.updatedAt).toISOString();
+      upsertForm.run(
+        formId, payload.inspectionId, form.formType, form.status,
+        form.observations, existing?.createdAt ?? now, updatedAt
+      );
+      deleteAnswers.run(formId);
+      if ('answers' in form) {
+        for (const answer of form.answers) {
+          insertAnswer.run(
+            randomUUID(), formId, answer.questionId, answer.answer ?? null,
+            answer.parameter ?? null, answer.reading ?? null, answer.comment ?? null,
+            now, updatedAt
+          );
+        }
+      }
+    }
+
+    this.database.prepare('DELETE FROM inspection_items WHERE inspection_id = ?').run(payload.inspectionId);
+    const insertItem = this.database.prepare(`INSERT INTO inspection_items (
+      id, inspection_id, form_type, item_id, location_id, location_name_snapshot,
+      custom_location, identifier, loop, device_type, alarm, supervision, cleaning,
+      observations, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const form of [
+      payload.alarms.addressedDevices,
+      payload.alarms.conventionalDevices,
+      payload.alarms.notificationDevices,
+    ]) {
+      for (const item of form.items) {
+        insertItem.run(
+          randomUUID(), payload.inspectionId, form.formType, item.id,
+          item.locationId ?? null, item.locationNameSnapshot, item.customLocation ? 1 : 0,
+          item.identifier, item.loop, item.deviceType, item.alarm || null,
+          item.supervision || null, item.cleaning || null, item.observations,
+          item.createdAt, item.updatedAt
+        );
+      }
+    }
+  }
+
+  upsertAnsulForm(payload: InspectionSyncPayload) {
+    if (!payload.ansul) return;
+    const now = new Date().toISOString();
+    const existing = this.database.prepare(
+      `SELECT id, created_at AS createdAt FROM inspection_forms
+       WHERE inspection_id = ? AND form_type = 'ansul_r102'`
+    ).get(payload.inspectionId) as { id: string; createdAt: string } | undefined;
+    const formId = existing?.id ?? randomUUID();
+    const updatedAt = new Date(payload.ansul.updatedAt).toISOString();
+    this.database.prepare(`
+      INSERT INTO inspection_forms (
+        id, inspection_id, form_type, status, observations, system_name,
+        capacity_gallons, normalization_issues, created_at, updated_at
+      ) VALUES (?, ?, 'ansul_r102', ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inspection_id, form_type) DO UPDATE SET
+        status=excluded.status,
+        observations=excluded.observations,
+        system_name=excluded.system_name,
+        capacity_gallons=excluded.capacity_gallons,
+        normalization_issues=excluded.normalization_issues,
+        updated_at=excluded.updated_at
+    `).run(
+      formId,
+      payload.inspectionId,
+      payload.ansul.status,
+      payload.ansul.observations,
+      payload.ansul.systemName,
+      payload.ansul.capacityGallons,
+      JSON.stringify(payload.ansul.normalizationIssues),
+      existing?.createdAt ?? now,
+      updatedAt
+    );
+    this.database.prepare('DELETE FROM inspection_answers WHERE form_id = ?').run(formId);
+    const insertAnswer = this.database.prepare(`
+      INSERT INTO inspection_answers (
+        id, form_id, question_id, answer, parameter_value, reading_value,
+        quantity_value, model_value, comment, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const answer of payload.ansul.answers) {
+      insertAnswer.run(
+        randomUUID(),
+        formId,
+        answer.questionId,
+        answer.answer ?? null,
+        answer.legacyParameter ?? null,
+        answer.legacyReading ?? null,
+        answer.quantity ?? null,
+        answer.model ?? null,
+        answer.comment ?? null,
+        now,
+        updatedAt
+      );
+    }
+  }
   getInspectionSignature(inspectionId: string, signatureType = 'technician'): InspectionSignature | undefined {
     return this.database.prepare(`SELECT id, inspection_id, signature_type, mime_type, file_path,
       signer_name, signed_at, created_at, updated_at FROM inspection_signatures
@@ -360,6 +681,11 @@ export class LocalDatabase {
     if (formatType === 'hidrantes') {
       return Boolean(this.database.prepare('SELECT 1 FROM hydrants WHERE inspection_id = ? AND id = ?')
         .get(inspectionId, itemId));
+    }
+    if (formatType === 'alarms') {
+      return Boolean(this.database.prepare(
+        'SELECT 1 FROM inspection_items WHERE inspection_id = ? AND item_id = ?'
+      ).get(inspectionId, itemId));
     }
     return false;
   }
@@ -643,7 +969,8 @@ export class LocalDatabase {
     const inspection = this.database.prepare(`
       SELECT id, company_id AS companyId, company_name AS companyName,
              branch_id AS branchId, branch_name AS branchName,
-             attention, area,
+             attention, area, alarm_system_name AS alarmSystemName,
+             alarm_system_discrepancies AS alarmSystemDiscrepanciesJson,
              inspection_date AS inspectionDate, technician_id AS technicianId,
              technician_name AS technicianName, selected_format_ids AS selectedFormatIdsJson
       FROM inspections WHERE id = ?
@@ -674,21 +1001,79 @@ export class LocalDatabase {
     const firePumpForms = this.database.prepare(`
       SELECT id, form_type AS formType, status, observations,
              created_at AS createdAt, updated_at AS updatedAt
-      FROM inspection_forms WHERE inspection_id = ? ORDER BY form_type
+      FROM inspection_forms WHERE inspection_id = ?
+        AND form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')
+      ORDER BY form_type
     `).all(inspectionId) as unknown as InspectionReportData['firePumps'];
     const answerQuery = this.database.prepare(`
       SELECT question_id AS questionId, answer, parameter_value AS parameter,
-             reading_value AS reading, comment, created_at AS createdAt,
+             reading_value AS reading, quantity_value AS quantity,
+             model_value AS model, comment, created_at AS createdAt,
              updated_at AS updatedAt
       FROM inspection_answers WHERE form_id = ? ORDER BY rowid
     `);
     firePumpForms.forEach((form) => {
       form.answers = answerQuery.all(form.id) as InspectionReportData['firePumps'][number]['answers'];
     });
+    const alarmForms = this.database.prepare(`
+      SELECT id, form_type AS formType, status, observations,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM inspection_forms WHERE inspection_id = ?
+        AND form_type IN ('alarm_panel', 'addressed_devices', 'conventional_devices', 'notification_devices')
+      ORDER BY form_type
+    `).all(inspectionId) as unknown as InspectionReportData['alarms']['forms'];
+    alarmForms.forEach((form) => {
+      form.answers = form.formType === 'alarm_panel'
+        ? answerQuery.all(form.id) as InspectionReportData['alarms']['forms'][number]['answers']
+        : [];
+    });
+    const rawAlarmItems = this.database.prepare(`
+      SELECT form_type AS formType, item_id AS id, location_id AS locationId,
+             location_name_snapshot AS locationNameSnapshot, custom_location AS customLocation,
+             identifier, loop, device_type AS deviceType, alarm, supervision, cleaning,
+             observations, created_at AS createdAt, updated_at AS updatedAt
+      FROM inspection_items WHERE inspection_id = ? ORDER BY rowid
+    `).all(inspectionId) as Array<Omit<InspectionReportData['alarms']['items'][number], 'customLocation'> & { customLocation: number }>;
+    const alarmItems = rawAlarmItems.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
+    const ansulForm = this.database.prepare(`
+      SELECT id, form_type AS formType, status, observations,
+             system_name AS systemName, capacity_gallons AS capacityGallons,
+             normalization_issues AS normalizationIssuesJson,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM inspection_forms WHERE inspection_id = ? AND form_type = 'ansul_r102'
+    `).get(inspectionId) as Omit<NonNullable<InspectionReportData['ansul']>, 'answers' | 'normalizationIssues'>
+      & { normalizationIssuesJson: string } | undefined;
+    let ansul: InspectionReportData['ansul'];
+    if (ansulForm) {
+      ansul = {
+        ...ansulForm,
+        normalizationIssues: JSON.parse(ansulForm.normalizationIssuesJson || '[]'),
+        answers: answerQuery.all(ansulForm.id).map((answer) => {
+          const row = answer as Record<string, unknown>;
+          return {
+            ...row,
+            quantity: row.quantity,
+            model: row.model,
+            legacyParameter: row.parameter,
+            legacyReading: row.reading,
+          };
+        }) as NonNullable<InspectionReportData['ansul']>['answers'],
+      };
+    }
     inspection.selectedFormatIds = JSON.parse(inspection.selectedFormatIdsJson || '[]') as string[];
     const signature = this.getInspectionSignature(inspectionId);
     const evidence = this.listInspectionEvidence(inspectionId);
-    return { inspection, extinguishers, hydrants, firePumps: firePumpForms, signature, evidence };
+    return {
+      inspection, extinguishers, hydrants, firePumps: firePumpForms,
+      alarms: {
+        systemName: inspection.alarmSystemName,
+        systemNameDiscrepancies: JSON.parse(inspection.alarmSystemDiscrepanciesJson || '[]'),
+        forms: alarmForms,
+        items: alarmItems,
+      },
+      ansul,
+      signature, evidence,
+    };
   }
 
   saveGeneratedReport(input: {
@@ -766,6 +1151,7 @@ export class LocalDatabase {
       FROM inspection_forms f
       LEFT JOIN inspection_answers a ON a.form_id = f.id
       WHERE f.inspection_id = ?
+        AND f.form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')
       GROUP BY f.id ORDER BY f.form_type
     `).all(report.inspection_id) as Array<{
       formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
@@ -773,10 +1159,37 @@ export class LocalDatabase {
       updatedAt: string;
       answered: number;
     }>;
-    const rawFormats = ids.filter((id) => !['jockey', 'diesel', 'electrica'].includes(id))
+    const alarmForms = this.database.prepare(`
+      SELECT f.form_type AS formType, f.status, f.updated_at AS updatedAt,
+             COUNT(DISTINCT i.item_id) AS itemCount,
+             COUNT(CASE WHEN a.answer IS NOT NULL THEN 1 END) AS answered
+      FROM inspection_forms f
+      LEFT JOIN inspection_answers a ON a.form_id = f.id
+      LEFT JOIN inspection_items i ON i.inspection_id = f.inspection_id AND i.form_type = f.form_type
+      WHERE f.inspection_id = ?
+        AND f.form_type IN ('alarm_panel', 'addressed_devices', 'conventional_devices', 'notification_devices')
+      GROUP BY f.id ORDER BY f.form_type
+    `).all(report.inspection_id) as GeneratedReport['alarm_forms'];
+    const ansulForm = this.database.prepare(`
+      SELECT f.status, f.system_name AS systemName,
+             f.capacity_gallons AS capacityGallons,
+             f.updated_at AS updatedAt,
+             COUNT(CASE WHEN a.answer IS NOT NULL THEN 1 END) AS answered
+      FROM inspection_forms f
+      LEFT JOIN inspection_answers a ON a.form_id = f.id
+      WHERE f.inspection_id = ? AND f.form_type = 'ansul_r102'
+      GROUP BY f.id
+    `).get(report.inspection_id) as GeneratedReport['ansul_form'];
+    const rawFormats = ids.filter((id) =>
+      !['jockey', 'diesel', 'electrica', 'tablero_ad', 'dispositivos_ad',
+        'dispositivos_convencionales', 'dispositivos_notificacion'].includes(id)
+    )
       .map((id) => labels[id] ?? id);
     if (ids.some((id) => ['jockey', 'diesel', 'electrica'].includes(id))) {
       rawFormats.push('Bombas');
+    }
+    if (ids.some((id) => ALARM_MOBILE_IDS.includes(id as typeof ALARM_MOBILE_IDS[number]))) {
+      rawFormats.push('Alarmas');
     }
     return {
       ...report,
@@ -789,6 +1202,8 @@ export class LocalDatabase {
         ...form,
         total: Object.keys(FIRE_PUMP_CONFIG[form.formType].questions).length,
       })),
+      alarm_forms: alarmForms,
+      ansul_form: ansulForm,
     };
   }
 
@@ -935,6 +1350,20 @@ export interface GeneratedReport {
     answered: number;
     total: number;
   }>;
+  alarm_forms: Array<{
+    formType: 'alarm_panel' | 'addressed_devices' | 'conventional_devices' | 'notification_devices';
+    status: string;
+    updatedAt: string;
+    itemCount: number;
+    answered: number;
+  }>;
+  ansul_form?: {
+    status: string;
+    systemName: string;
+    capacityGallons: string;
+    updatedAt: string;
+    answered: number;
+  };
 }
 
 export interface InspectionSignature {
@@ -980,6 +1409,8 @@ export interface InspectionReportData {
     branchName: string | null;
     attention: string;
     area: string;
+    alarmSystemName: string;
+    alarmSystemDiscrepanciesJson: string;
     inspectionDate: string;
     technicianId: string | null;
     technicianName: string;
@@ -1005,6 +1436,65 @@ export interface InspectionReportData {
       updatedAt: string;
     }>;
   }>;
+  alarms: {
+    systemName: string;
+    systemNameDiscrepancies: Array<{ source: string; value: string }>;
+    forms: Array<{
+      id: string;
+      formType: 'alarm_panel' | 'addressed_devices' | 'conventional_devices' | 'notification_devices';
+      status: 'not_started' | 'in_progress' | 'complete' | 'not_applicable';
+      observations: string;
+      createdAt: string;
+      updatedAt: string;
+      answers: Array<{
+        questionId: string;
+        answer: 'si' | 'no' | 'na' | null;
+        parameter: string | number | null;
+        reading: string | number | null;
+        comment: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+    }>;
+    items: Array<{
+      formType: 'addressed_devices' | 'conventional_devices' | 'notification_devices';
+      id: string;
+      locationId: string | null;
+      locationNameSnapshot: string;
+      customLocation: boolean;
+      identifier: string;
+      loop: string;
+      deviceType: string;
+      alarm: 'si' | 'no' | 'na' | null;
+      supervision: 'si' | 'no' | 'na' | null;
+      cleaning: 'si' | 'no' | 'na' | null;
+      observations: string;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+  };
+  ansul?: {
+    id: string;
+    formType: 'ansul_r102';
+    status: 'not_started' | 'in_progress' | 'complete' | 'not_applicable';
+    systemName: string;
+    capacityGallons: string;
+    observations: string;
+    normalizationIssues: Array<{ source: string; questionId?: string; message: string }>;
+    createdAt: string;
+    updatedAt: string;
+    answers: Array<{
+      questionId: string;
+      answer: 'si' | 'no' | 'na' | null;
+      quantity: string | number | null;
+      model: string | number | null;
+      comment: string | null;
+      legacyParameter: string | number | null;
+      legacyReading: string | number | null;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  };
   signature: InspectionSignature | undefined;
   evidence: InspectionEvidence[];
 }

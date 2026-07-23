@@ -1,4 +1,9 @@
-export type CatalogEquipmentType = 'extinguisher' | 'hydrant';
+export type CatalogEquipmentType =
+  | 'extinguisher'
+  | 'hydrant'
+  | 'addressed_device'
+  | 'conventional_device'
+  | 'notification_device';
 
 export interface CatalogCompany {
   id: string;
@@ -40,4 +45,5 @@ export interface CatalogStatus {
   companies: number;
   extinguisherLocations: number;
   hydrantLocations: number;
+  alarmLocations: number;
 }

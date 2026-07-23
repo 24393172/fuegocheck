@@ -12,6 +12,13 @@ import { createApp } from '../src/app.js';
 import { LocalDatabase } from '../src/database.js';
 import { ExtinguisherReportService, SHEET_CLEANUP_CONFIG } from '../src/report-generator.js';
 import { FIRE_PUMP_CONFIG, FIRE_PUMP_FORM_TYPES, PumpFormType } from '../src/fire-pump-config.js';
+import {
+  ALARM_DEVICE_CONFIG,
+  ALARM_MOBILE_IDS,
+  ALARM_PANEL_QUESTION_CELLS,
+  AlarmDeviceFormType,
+} from '../src/alarm-config.js';
+import { ANSUL_QUESTION_CELLS } from '../src/ansul-config.js';
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
 const templatePath = path.join(serverRoot, 'templates', 'FORMATOS P.R. CANCUN.xlsx');
@@ -161,6 +168,110 @@ function firePumpsPayload(inspectionId = 'inspection-fire-pumps-001') {
     syncVersion: 300,
     selectedFormatIds: ['jockey', 'electrica', 'diesel'],
     firePumps: FIRE_PUMP_FORM_TYPES.map(completeFirePumpForm),
+    signature: technicianSignature(),
+  };
+}
+
+function alarmDevice(formType: AlarmDeviceFormType, suffix: number) {
+  return {
+    id: `00000000-0000-4000-8000-${String(suffix).padStart(12, '0')}`,
+    identifier: `D-${suffix}`,
+    loop: `L-${suffix}`,
+    deviceType: formType === 'notification_devices' ? 'Sirena' : 'Detector de humo',
+    locationId: null,
+    locationNameSnapshot: `Nivel ${suffix} · Pasillo`,
+    customLocation: true,
+    alarm: 'si' as const,
+    supervision: 'no' as const,
+    cleaning: 'na' as const,
+    observations: `Observación dispositivo ${suffix}`,
+    createdAt: 1_785_000_000_000 + suffix,
+    updatedAt: 1_785_000_001_000 + suffix,
+  };
+}
+
+function alarmPayload(inspectionId = 'inspection-alarms-001') {
+  const answers = Object.keys(ALARM_PANEL_QUESTION_CELLS).map((questionId, index) => ({
+    questionId,
+    answer: (index % 3 === 0 ? 'si' : index % 3 === 1 ? 'na' : 'no') as 'si' | 'na' | 'no',
+    parameter: index === 0 ? 'Parámetro piloto' : '',
+    reading: index === 0 ? 'Lectura piloto' : '',
+    comment: index === 0 ? 'Comentario piloto' : '',
+  }));
+  return {
+    inspectionId,
+    company: { id: 'company-alarms', name: 'Hotel Alarmas' },
+    branch: { id: 'branch-alarms', name: 'Torre A' },
+    attention: 'Mantenimiento',
+    area: 'Áreas comunes',
+    date: '2026-07-23',
+    technician: { id: null, name: 'Daniel Cocom' },
+    syncVersion: 400,
+    selectedFormatIds: [...ALARM_MOBILE_IDS],
+    alarms: {
+      systemName: 'Notifier NFS2-3030',
+      systemNameDiscrepancies: [
+        { source: 'legacy.panel.sistema', value: 'Notifier antiguo' },
+      ],
+      panel: {
+        formType: 'alarm_panel' as const,
+        status: 'complete' as const,
+        observations: 'Tablero operando correctamente.',
+        updatedAt: 1_785_000_000_000,
+        answers,
+      },
+      addressedDevices: {
+        formType: 'addressed_devices' as const,
+        status: 'complete' as const,
+        items: [alarmDevice('addressed_devices', 1)],
+        observations: 'Dispositivos direccionados revisados.',
+        updatedAt: 1_785_000_000_001,
+      },
+      conventionalDevices: {
+        formType: 'conventional_devices' as const,
+        status: 'complete' as const,
+        items: [alarmDevice('conventional_devices', 2)],
+        observations: 'Dispositivos convencionales revisados.',
+        updatedAt: 1_785_000_000_002,
+      },
+      notificationDevices: {
+        formType: 'notification_devices' as const,
+        status: 'complete' as const,
+        items: [alarmDevice('notification_devices', 3)],
+        observations: 'Dispositivos de notificación revisados.',
+        updatedAt: 1_785_000_000_003,
+      },
+    },
+  };
+}
+
+function ansulPayload(inspectionId = 'inspection-ansul-001') {
+  return {
+    inspectionId,
+    company: { id: 'company-ansul', name: 'Restaurante Piloto' },
+    branch: { id: 'branch-ansul', name: 'Edificio principal' },
+    attention: 'Mantenimiento',
+    area: 'Cocina general',
+    date: '2026-07-23',
+    technician: { id: null, name: 'Daniel Cocom' },
+    syncVersion: 500,
+    selectedFormatIds: ['ansul_r102'],
+    ansul: {
+      formType: 'ansul_r102' as const,
+      status: 'complete' as const,
+      systemName: 'Sistema cocina principal',
+      capacityGallons: '3',
+      observations: 'Primera línea conservada.\nSegunda línea conservada.',
+      normalizationIssues: [],
+      updatedAt: 1_785_000_000_500,
+      answers: Object.keys(ANSUL_QUESTION_CELLS).map((questionId, index) => ({
+        questionId,
+        answer: (index % 3 === 0 ? 'si' : index % 3 === 1 ? 'na' : 'no') as 'si' | 'na' | 'no',
+        quantity: index === 0 ? 2 : undefined,
+        model: index === 0 ? 'R-102-A' : undefined,
+        comment: index === 0 ? 'Revisión piloto' : undefined,
+      })),
+    },
     signature: technicianSignature(),
   };
 }
@@ -458,7 +569,11 @@ test('admin catalog persists companies, branches and filtered equipment location
   assert.equal(branchResponse.status, 201);
   const branch = await branchResponse.json() as { branch: { id: string } };
 
-  const createLocation = async (equipmentType: 'extinguisher' | 'hydrant', name: string) => {
+  const createLocation = async (
+    equipmentType: 'extinguisher' | 'hydrant' | 'addressed_device'
+      | 'conventional_device' | 'notification_device',
+    name: string
+  ) => {
     const response = await fetch(`${baseUrl}/api/companies/${firstCompany.company.id}/locations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -477,6 +592,9 @@ test('admin catalog persists companies, branches and filtered equipment location
   };
   const extinguisherLocation = await createLocation('extinguisher', 'Acceso principal');
   await createLocation('hydrant', 'Patio de maniobras');
+  await createLocation('addressed_device', 'Pasillo principal');
+  await createLocation('conventional_device', 'Cuarto de máquinas');
+  await createLocation('notification_device', 'Vestíbulo');
 
   const filtered = await fetch(`${baseUrl}/api/companies/${firstCompany.company.id}/locations?equipmentType=extinguisher`);
   const filteredBody = await filtered.json() as { locations: Array<{ equipmentType: string }> };
@@ -501,7 +619,7 @@ test('admin catalog persists companies, branches and filtered equipment location
 
   const reopened = new AdminRepository(databasePath);
   assert.equal(reopened.listCompanies({ search: 'caribe' }).length, 1);
-  assert.equal(reopened.listLocations(firstCompany.company.id, {}).length, 2);
+  assert.equal(reopened.listLocations(firstCompany.company.id, {}).length, 5);
   reopened.close();
 
   const adminPage = await fetch(`${baseUrl}/admin`);
@@ -517,6 +635,9 @@ test('optional seed is repeatable without duplicating example data', async (cont
   assert.equal(companies.length, 1);
   assert.equal(adminRepository.listLocations(companies[0].id, { equipmentType: 'extinguisher' }).length, 3);
   assert.equal(adminRepository.listLocations(companies[0].id, { equipmentType: 'hydrant' }).length, 2);
+  assert.equal(adminRepository.listLocations(companies[0].id, { equipmentType: 'addressed_device' }).length, 1);
+  assert.equal(adminRepository.listLocations(companies[0].id, { equipmentType: 'conventional_device' }).length, 1);
+  assert.equal(adminRepository.listLocations(companies[0].id, { equipmentType: 'notification_device' }).length, 1);
 });
 
 test('a generation failure keeps the inspection and records the report error', async (context) => {
@@ -555,59 +676,138 @@ test('a generation failure keeps the inspection and records the report error', a
   assert.match(reportListBody.reports[0].errorMessage, /template not found/i);
 });
 
-test('atomic sync stores selected formats, reports partial support and is idempotent', async (context) => {
+test('Ansul synchronizes atomically, is idempotent and fills the official sheet', async (context) => {
   const { database, baseUrl } = await testServer(context);
-  const body = {
-    ...payload('inspection-atomic-001'),
-    selectedFormatIds: ['extintores', 'tablero_ad'],
-  };
+  const templateHashBefore = fileHash(templatePath);
+  const body = ansulPayload();
   const first = await fetch(`${baseUrl}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   assert.equal(first.status, 201);
   const firstBody = await first.json() as {
-    syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: { id: string };
+    syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string;
+    ansulFormsReceived: number; report: { id: string };
   };
-  assert.deepEqual(firstBody.syncedFormatIds, ['extintores']);
-  assert.deepEqual(firstBody.unsupportedFormatIds, ['tablero_ad']);
-  assert.equal(firstBody.syncStatus, 'partial');
-  assert.ok(firstBody.report.id);
+  assert.deepEqual(firstBody.syncedFormatIds, ['ansul_r102']);
+  assert.deepEqual(firstBody.unsupportedFormatIds, []);
+  assert.equal(firstBody.syncStatus, 'synced');
+  assert.equal(firstBody.ansulFormsReceived, 1);
 
   const repeated = await fetch(`${baseUrl}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   assert.equal(repeated.status, 200);
+  const repeatedBody = await repeated.json() as { report: { id: string } };
+  assert.equal(repeatedBody.report.id, firstBody.report.id);
   assert.equal(database.inspectionCount(body.inspectionId), 1);
-  assert.equal(database.extinguisherCount(body.inspectionId), 3);
   assert.equal(database.reportCount(body.inspectionId), 1);
-  assert.deepEqual(database.getInspectionReportData(body.inspectionId)?.inspection.selectedFormatIds,
-    ['extintores', 'tablero_ad']);
+  const reportData = database.getInspectionReportData(body.inspectionId);
+  assert.equal(reportData?.ansul?.answers.length, 17);
+  assert.equal(reportData?.ansul?.systemName, 'Sistema cocina principal');
+  assert.equal(reportData?.ansul?.answers[0].quantity, '2.0');
+  assert.equal(reportData?.ansul?.answers[0].model, 'R-102-A');
 
-  const unsupportedOnly = {
-    inspectionId: 'inspection-unsupported-only', company: body.company, date: body.date,
-    technician: body.technician, syncVersion: 1, selectedFormatIds: ['tablero_ad'],
-  };
-  const unsupportedResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(unsupportedOnly),
+  const report = database.getReport(firstBody.report.id);
+  assert.ok(report);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.file_path);
+  const sheet = workbook.getWorksheet('Ansul R-102');
+  assert.ok(sheet);
+  assert.equal(sheet.getCell('F9').value, 'Restaurante Piloto');
+  assert.equal(sheet.getCell('F10').value, 'Mantenimiento');
+  assert.equal(sheet.getCell('F11').value, 'Cocina general');
+  assert.equal(sheet.getCell('F12').value, '2026-07-23');
+  assert.equal(sheet.getCell('A16').value, 'SISTEMA R-102 CON CAPACIDAD DE 3 GALONES');
+  assert.equal(sheet.getCell('Q17').value, 'X');
+  assert.equal(sheet.getCell('S18').value, 'X');
+  assert.equal(sheet.getCell('U19').value, 'X');
+  assert.equal(sheet.getCell('W17').value, 2);
+  assert.equal(sheet.getCell('AA17').value, 'R-102-A');
+  assert.equal(sheet.getCell('AE17').value, 'Revisión piloto');
+  assert.equal(sheet.getCell('F36').value, 'Primera línea conservada.');
+  assert.equal(sheet.getCell('F37').value, 'Segunda línea conservada.');
+  body.ansul.answers[0].answer = 'no';
+  body.ansul.answers[0].quantity = undefined;
+  const changed = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
-  assert.equal(unsupportedResponse.status, 201);
-  const unsupportedBody = await unsupportedResponse.json() as {
-    syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: null;
-  };
-  assert.deepEqual(unsupportedBody.syncedFormatIds, []);
-  assert.deepEqual(unsupportedBody.unsupportedFormatIds, ['tablero_ad']);
-  assert.equal(unsupportedBody.syncStatus, 'partial');
-  assert.equal(unsupportedBody.report, null);
-  assert.equal(database.inspectionCount(unsupportedOnly.inspectionId), 1);
+  assert.equal(changed.status, 200);
+  const regenerated = new ExcelJS.Workbook();
+  await regenerated.xlsx.readFile(database.getReport(firstBody.report.id)!.file_path);
+  assert.equal(regenerated.getWorksheet('Ansul R-102')!.getCell('Q17').value, null);
+  assert.equal(regenerated.getWorksheet('Ansul R-102')!.getCell('U17').value, 'X');
+  assert.equal(regenerated.getWorksheet('Ansul R-102')!.getCell('W17').value, null);
+  assert.equal(fileHash(templatePath), templateHashBefore);
+});
 
-  const extOnly = { ...payload('inspection-atomic-ext-only'), selectedFormatIds: ['extintores'] };
-  const extOnlyResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(extOnly),
+test('Ansul validation rejects missing data, duplicate questionId and invalid answers atomically', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const missing = ansulPayload('inspection-ansul-missing');
+  const missingBody = { ...missing, ansul: undefined };
+  const missingResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(missingBody),
   });
-  const extOnlyBody = await extOnlyResponse.json() as { syncStatus: string; syncedFormatIds: string[] };
-  assert.equal(extOnlyResponse.status, 201);
-  assert.equal(extOnlyBody.syncStatus, 'synced');
-  assert.deepEqual(extOnlyBody.syncedFormatIds, ['extintores']);
+  assert.equal(missingResponse.status, 400);
+  assert.equal(database.inspectionCount(missing.inspectionId), 0);
+
+  const duplicate = ansulPayload('inspection-ansul-duplicate');
+  duplicate.ansul.answers.push({ ...duplicate.ansul.answers[0] });
+  const duplicateResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(duplicate),
+  });
+  assert.equal(duplicateResponse.status, 400);
+  assert.equal(database.inspectionCount(duplicate.inspectionId), 0);
+
+  const invalid = ansulPayload('inspection-ansul-invalid');
+  const invalidBody = {
+    ...invalid,
+    ansul: {
+      ...invalid.ansul,
+      answers: invalid.ansul.answers.map((answer, index) =>
+        index === 0 ? { ...answer, answer: 'tal_vez' } : answer),
+    },
+  };
+  const invalidResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(invalidBody),
+  });
+  assert.equal(invalidResponse.status, 400);
+  assert.equal(database.inspectionCount(invalid.inspectionId), 0);
+});
+
+test('all supported formats share one atomic inspection and one official report', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const ansul = ansulPayload('inspection-all-formats');
+  const alarms = alarmPayload(ansul.inspectionId);
+  const combined = {
+    ...ansul,
+    selectedFormatIds: [
+      'extintores', 'hidrantes', 'jockey', 'electrica', 'diesel',
+      ...ALARM_MOBILE_IDS, 'ansul_r102',
+    ],
+    extinguishers: [extinguisher('ext-all-1', '1')],
+    hydrants: [hydrant('hyd-all-1', '1')],
+    firePumps: FIRE_PUMP_FORM_TYPES.map(completeFirePumpForm),
+    alarms: alarms.alarms,
+  };
+  const response = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(combined),
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { syncedFormatIds: string[]; syncStatus: string; report: { id: string } };
+  assert.deepEqual(body.syncedFormatIds, [
+    'extintores', 'hidrantes', 'fire_pumps', 'alarms', 'ansul_r102',
+  ]);
+  assert.equal(body.syncStatus, 'synced');
+  assert.equal(database.reportCount(combined.inspectionId), 1);
+  const report = database.getReport(body.report.id);
+  assert.ok(report);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.file_path);
+  for (const sheetName of [
+    'EXTINTORES', 'HIDRANTES', 'B Jockey', 'B Electrica', 'B Diesel',
+    'Tablero A&D', 'Dispositivos A&D', 'Dispositivos Convencionales',
+    'Dispositivos Notificacion', 'Ansul R-102', 'FIRMAS',
+  ]) assert.ok(workbook.getWorksheet(sheetName), `Missing ${sheetName}`);
 });
 
 test('Bombas synchronizes atomically, is idempotent and fills the three official sheets', async (context) => {
@@ -713,6 +913,160 @@ test('Bombas rejects incomplete groups, duplicate questionIds and invalid answer
   });
   assert.equal(invalidResponse.status, 400);
   assert.equal(database.inspectionCount(invalid.inspectionId), 0);
+});
+
+test('Alarmas synchronizes atomically, stores the shared system and fills the four official sheets', async (context) => {
+  const { database, reportService, baseUrl } = await testServer(context);
+  const templateHashBefore = fileHash(templatePath);
+  const body = alarmPayload();
+
+  const first = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json() as {
+    syncedFormatIds: string[];
+    syncStatus: string;
+    alarmFormsReceived: number;
+    alarmDevicesReceived: number;
+    report: { id: string };
+  };
+  assert.deepEqual(firstBody.syncedFormatIds, ['alarms']);
+  assert.equal(firstBody.syncStatus, 'synced');
+  assert.equal(firstBody.alarmFormsReceived, 4);
+  assert.equal(firstBody.alarmDevicesReceived, 3);
+
+  const repeated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(repeated.status, 200);
+  const repeatedBody = await repeated.json() as { report: { id: string } };
+  assert.equal(repeatedBody.report.id, firstBody.report.id);
+  assert.equal(database.reportCount(body.inspectionId), 1);
+
+  const stored = database.getInspectionReportData(body.inspectionId);
+  assert.equal(stored?.alarms.systemName, 'Notifier NFS2-3030');
+  assert.deepEqual(stored?.alarms.systemNameDiscrepancies, body.alarms.systemNameDiscrepancies);
+  assert.equal(stored?.alarms.forms.length, 4);
+  assert.equal(stored?.alarms.items.length, 3);
+  assert.equal(stored?.alarms.forms.find((form) => form.formType === 'alarm_panel')?.answers.length, 28);
+  const reportList = await (await fetch(`${baseUrl}/api/reports`)).json() as {
+    reports: Array<{ formats: string; alarmForms: Array<{ formType: string; itemCount: number }> }>;
+  };
+  assert.equal(reportList.reports[0].formats, 'Alarmas');
+  assert.equal(reportList.reports[0].alarmForms.length, 4);
+  assert.equal(reportList.reports[0].alarmForms.find(
+    (form) => form.formType === 'addressed_devices'
+  )?.itemCount, 1);
+
+  const report = reportService.resolveDownload(firstBody.report.id);
+  assert.ok(report);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.filePath);
+  assertUnselectedVariableAreasAreEmpty(workbook, [
+    'Tablero A&D', 'Dispositivos A&D', 'Dispositivos Convencionales', 'Dispositivos Notificacion',
+  ]);
+  const panel = workbook.getWorksheet('Tablero A&D');
+  assert.ok(panel);
+  assert.equal(panel.getCell('F9').value, body.company.name);
+  assert.equal(panel.getCell('F10').value, body.attention);
+  assert.notEqual(panel.getCell('F10').value, body.alarms.systemName);
+  assert.equal(panel.getCell('Q18').value, 'X');
+  assert.equal(panel.getCell('S19').value, 'X');
+  assert.equal(panel.getCell('U20').value, 'X');
+  assert.equal(panel.getCell('W18').value, 'Parámetro piloto');
+  assert.equal(panel.getCell('AA18').value, 'Lectura piloto');
+  assert.equal(panel.getCell('AE18').value, 'Comentario piloto');
+  assert.equal(panel.getCell('F49').value, 'Tablero operando correctamente.');
+
+  for (const [formType, config] of Object.entries(ALARM_DEVICE_CONFIG) as
+    Array<[AlarmDeviceFormType, typeof ALARM_DEVICE_CONFIG[AlarmDeviceFormType]]>) {
+    const sheet = workbook.getWorksheet(config.sheetName);
+    assert.ok(sheet);
+    assert.equal(sheet.getCell('F9').value, body.company.name);
+    assert.equal(sheet.getCell('F10').value, body.alarms.systemName);
+    assert.equal(sheet.getCell('F11').value, body.date);
+    const item = stored!.alarms.items.find((candidate) => candidate.formType === formType)!;
+    assert.equal(sheet.getCell(`${config.columns.identifier}${config.firstRow}`).value, item.identifier);
+    assert.equal(sheet.getCell(`${config.columns.location}${config.firstRow}`).value, item.locationNameSnapshot);
+    assert.equal(sheet.getCell(`${config.columns.alarm}${config.firstRow}`).value, 'Sí');
+    assert.equal(sheet.getCell(`${config.columns.supervision}${config.firstRow}`).value, 'No');
+    assert.equal(sheet.getCell(`${config.columns.cleaning}${config.firstRow}`).value, 'N/A');
+    assert.equal(sheet.getCell(`${config.columns.comments}${config.firstRow}`).value, item.observations);
+  }
+  assert.equal(fileHash(templatePath), templateHashBefore);
+
+  const changed = structuredClone(body);
+  changed.alarms.addressedDevices.items = [];
+  changed.alarms.addressedDevices.status = 'not_started';
+  changed.alarms.systemName = 'Notifier actualizado';
+  changed.syncVersion += 1;
+  const regenerated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changed),
+  });
+  assert.equal(regenerated.status, 200);
+  const updated = database.getInspectionReportData(body.inspectionId);
+  assert.equal(updated?.alarms.items.length, 2);
+  assert.equal(updated?.alarms.systemName, 'Notifier actualizado');
+  assert.equal(database.reportCount(body.inspectionId), 1);
+});
+
+test('Alarmas validates the atomic group, shared system, duplicate IDs and panel-only exception', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+
+  const incomplete = alarmPayload('inspection-alarms-incomplete');
+  incomplete.selectedFormatIds = ['tablero_ad'];
+  const incompleteResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(incomplete),
+  });
+  assert.equal(incompleteResponse.status, 400);
+  assert.equal(database.inspectionCount(incomplete.inspectionId), 0);
+
+  const noSystem = alarmPayload('inspection-alarms-no-system');
+  noSystem.alarms.systemName = '';
+  const noSystemResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(noSystem),
+  });
+  assert.equal(noSystemResponse.status, 400);
+  assert.equal(database.inspectionCount(noSystem.inspectionId), 0);
+
+  const duplicate = alarmPayload('inspection-alarms-duplicate');
+  duplicate.alarms.notificationDevices.items[0].id = duplicate.alarms.addressedDevices.items[0].id;
+  const duplicateResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(duplicate),
+  });
+  assert.equal(duplicateResponse.status, 400);
+  assert.equal(database.inspectionCount(duplicate.inspectionId), 0);
+
+  const unknownQuestion = alarmPayload('inspection-alarms-unknown-question');
+  unknownQuestion.alarms.panel.answers.push({
+    questionId: 'legacy_position_29',
+    answer: 'si',
+    parameter: '',
+    reading: '',
+    comment: '',
+  });
+  const unknownQuestionResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(unknownQuestion),
+  });
+  assert.equal(unknownQuestionResponse.status, 400);
+  assert.equal(database.inspectionCount(unknownQuestion.inspectionId), 0);
+
+  const panelOnly = alarmPayload('inspection-alarms-panel-only');
+  panelOnly.alarms.systemName = '';
+  for (const form of [
+    panelOnly.alarms.addressedDevices,
+    panelOnly.alarms.conventionalDevices,
+    panelOnly.alarms.notificationDevices,
+  ]) {
+    form.status = 'not_applicable';
+    form.items = [];
+  }
+  const panelOnlyResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(panelOnly),
+  });
+  assert.equal(panelOnlyResponse.status, 201);
+  assert.equal(database.getInspectionReportData(panelOnly.inspectionId)?.alarms.systemName, '');
 });
 
 test('Bombas, Extintores, Hidrantes, firma and pump evidence share one official report', async (context) => {

@@ -3,6 +3,8 @@ import { HydrantRecord } from '../types/hydrant.types';
 import { File, Paths } from 'expo-file-system';
 import { fetch as expoFetch } from 'expo/fetch';
 import { Photo } from '../types/inspection.types';
+import { AlarmAnswer, AlarmDeviceItem, AlarmFormStatus } from '../types/alarm.types';
+import { AnsulAnswer, AnsulFormStatus } from '../types/ansul.types';
 
 const REQUEST_TIMEOUT_MS = 7000;
 
@@ -47,6 +49,48 @@ export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'ex
       comment?: string;
     }>;
   }>;
+  alarms?: {
+    systemName: string;
+    systemNameDiscrepancies: Array<{ source: string; value: string }>;
+    panel: {
+      formType: 'alarm_panel';
+      status: AlarmFormStatus;
+      observations: string;
+      updatedAt: number;
+      answers: AlarmAnswer[];
+    };
+    addressedDevices: {
+      formType: 'addressed_devices';
+      status: AlarmFormStatus;
+      items: AlarmDeviceItem[];
+      observations: string;
+      updatedAt: number;
+    };
+    conventionalDevices: {
+      formType: 'conventional_devices';
+      status: AlarmFormStatus;
+      items: AlarmDeviceItem[];
+      observations: string;
+      updatedAt: number;
+    };
+    notificationDevices: {
+      formType: 'notification_devices';
+      status: AlarmFormStatus;
+      items: AlarmDeviceItem[];
+      observations: string;
+      updatedAt: number;
+    };
+  };
+  ansul?: {
+    formType: 'ansul_r102';
+    status: AnsulFormStatus;
+    systemName: string;
+    capacityGallons: string;
+    observations: string;
+    normalizationIssues: Array<{ source: string; questionId?: string; message: string }>;
+    updatedAt: number;
+    answers: AnsulAnswer[];
+  };
   signature?: {
     mimeType: 'image/png';
     dataBase64: string;

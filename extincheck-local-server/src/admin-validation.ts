@@ -16,7 +16,13 @@ export const branchInputSchema = z.object({
   active: z.boolean().default(true),
 }).strict();
 
-export const equipmentTypeSchema = z.enum(['extinguisher', 'hydrant']);
+export const equipmentTypeSchema = z.enum([
+  'extinguisher',
+  'hydrant',
+  'addressed_device',
+  'conventional_device',
+  'notification_device',
+]);
 
 export const locationInputSchema = z.object({
   branchId: uuidSchema.nullable().default(null),

@@ -14,6 +14,7 @@ export interface FormField {
   required: boolean;
   section: string;
   options?: string[];
+  maxLength?: number;
   // Fixed reference text printed on the paper form (e.g. "NFPA 20"). Shown in
   // the Excel "Parámetros" column. The technician does NOT fill this in.
   parametro?: string;

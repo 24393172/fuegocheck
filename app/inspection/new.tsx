@@ -18,6 +18,9 @@ import { loadSettings } from '../../lib/settings-manager';
 import { INSPECTION_FORMAT_OPTIONS, PUMPS_FORMAT_ID } from '../../lib/inspection-formats';
 import { SITE_FORM_TYPE, SITE_FORM_VERSION, SiteFormData } from '../../types/inspection.types';
 import { normalizeFirePumpsData } from '../../lib/fire-pumps';
+import { ALARM_FORMAT_ID, normalizeAlarmsData } from '../../lib/alarms';
+import { ANSUL_FORMAT_ID, normalizeAnsulData } from '../../lib/ansul';
+import { ansulR102Form, tableroAdForm } from '../../schemas';
 
 type Step = 'template' | 'client';
 
@@ -240,6 +243,12 @@ export default function NewInspectionScreen() {
         : [];
       if (selectedFormat?.id === PUMPS_FORMAT_ID) {
         initialFormData.firePumps = normalizeFirePumpsData(undefined).data;
+      }
+      if (selectedFormat?.id === ALARM_FORMAT_ID) {
+        initialFormData.alarms = normalizeAlarmsData(initialFormData, tableroAdForm).data;
+      }
+      if (selectedFormat?.id === ANSUL_FORMAT_ID) {
+        initialFormData.ansul = normalizeAnsulData(initialFormData, ansulR102Form).data;
       }
 
       const inspection = await createInspection({

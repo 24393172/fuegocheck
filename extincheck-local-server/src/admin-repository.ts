@@ -44,7 +44,9 @@ export class AdminRepository {
         id TEXT PRIMARY KEY,
         company_id TEXT NOT NULL REFERENCES companies(id),
         branch_id TEXT REFERENCES branches(id),
-        equipment_type TEXT NOT NULL CHECK (equipment_type IN ('extinguisher', 'hydrant')),
+        equipment_type TEXT NOT NULL CHECK (equipment_type IN (
+          'extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'
+        )),
         name TEXT NOT NULL,
         area TEXT NOT NULL DEFAULT '',
         floor TEXT NOT NULL DEFAULT '',
@@ -60,6 +62,44 @@ export class AdminRepository {
       CREATE INDEX IF NOT EXISTS idx_locations_branch
       ON equipment_locations(branch_id);
     `);
+    const locationTable = this.database.prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_locations'`
+    ).get() as { sql: string } | undefined;
+    if (locationTable?.sql && !locationTable.sql.includes('addressed_device')) {
+      this.database.exec('PRAGMA foreign_keys = OFF;');
+      try {
+        this.database.exec(`
+          BEGIN IMMEDIATE;
+          CREATE TABLE equipment_locations_v2 (
+            id TEXT PRIMARY KEY,
+            company_id TEXT NOT NULL REFERENCES companies(id),
+            branch_id TEXT REFERENCES branches(id),
+            equipment_type TEXT NOT NULL CHECK (equipment_type IN (
+              'extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'
+            )),
+            name TEXT NOT NULL,
+            area TEXT NOT NULL DEFAULT '',
+            floor TEXT NOT NULL DEFAULT '',
+            reference TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO equipment_locations_v2 SELECT * FROM equipment_locations;
+          DROP TABLE equipment_locations;
+          ALTER TABLE equipment_locations_v2 RENAME TO equipment_locations;
+          CREATE INDEX idx_locations_company_type
+            ON equipment_locations(company_id, equipment_type, active);
+          CREATE INDEX idx_locations_branch ON equipment_locations(branch_id);
+          COMMIT;
+        `);
+      } catch (error) {
+        try { this.database.exec('ROLLBACK;'); } catch { /* transaction may already be closed */ }
+        throw error;
+      } finally {
+        this.database.exec('PRAGMA foreign_keys = ON;');
+      }
+    }
   }
 
   listCompanies(filters: { search?: string; active?: ActiveFilter } = {}) {
@@ -292,6 +332,9 @@ export class AdminRepository {
       ['extinguisher', 'Cuarto eléctrico'],
       ['hydrant', 'Patio norte'],
       ['hydrant', 'Acceso de proveedores'],
+      ['addressed_device', 'Pasillo principal'],
+      ['conventional_device', 'Cuarto de máquinas'],
+      ['notification_device', 'Vestíbulo principal'],
     ];
     const existing = this.listLocations(companyId);
     for (const [equipmentType, name] of examples) {

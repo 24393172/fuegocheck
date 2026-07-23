@@ -187,6 +187,10 @@ export function createApp(
         );
         const hasFirePumps = Boolean(payload.firePumps?.length);
         if (hasFirePumps) supported.push('fire_pumps');
+        const hasAlarms = Boolean(payload.alarms);
+        if (hasAlarms) supported.push('alarms');
+        const hasAnsul = Boolean(payload.ansul);
+        if (hasAnsul) supported.push('ansul_r102');
         const previousSignature = database.getInspectionSignature(payload.inspectionId);
         const newSignaturePath = payload.signature && path.join(signaturesDirectory, `${randomUUID()}.png`);
         const stagedSignaturePath = newSignaturePath && `${newSignaturePath}.pending`;
@@ -201,6 +205,8 @@ export function createApp(
           if (payload.extinguishers) database.upsertInspection({ ...payload, extinguishers: payload.extinguishers }, false);
           if (payload.hydrants) database.upsertHydrantInspection({ ...payload, hydrants: payload.hydrants }, false);
           if (payload.firePumps) database.upsertFirePumpForms(payload);
+          if (payload.alarms) database.upsertAlarmForms(payload);
+          if (payload.ansul) database.upsertAnsulForm(payload);
           database.clearUnselectedSupportedFormats(payload.inspectionId, payload.selectedFormatIds);
           database.setSelectedFormatIds(payload.inspectionId, payload.selectedFormatIds);
           if (payload.signature !== undefined) {
@@ -238,18 +244,34 @@ export function createApp(
       });
       const unsupportedFormatIds = payload.selectedFormatIds.filter((id) => {
         if (['jockey', 'electrica', 'diesel'].includes(id)) return !result.supported.includes('fire_pumps');
+        if (['tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion'].includes(id)) {
+          return !result.supported.includes('alarms');
+        }
         return !result.supported.includes(id);
       });
       const selectedLogicalFormats = [
-        ...payload.selectedFormatIds.filter((id) => !['jockey', 'electrica', 'diesel'].includes(id)),
+        ...payload.selectedFormatIds.filter((id) =>
+          !['jockey', 'electrica', 'diesel', 'tablero_ad', 'dispositivos_ad',
+            'dispositivos_convencionales', 'dispositivos_notificacion'].includes(id)
+        ),
         ...(payload.selectedFormatIds.some((id) => ['jockey', 'electrica', 'diesel'].includes(id))
           ? ['fire_pumps'] : []),
+        ...(payload.selectedFormatIds.some((id) =>
+          ['tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion'].includes(id)
+        ) ? ['alarms'] : []),
       ];
       response.status(result.created ? 201 : 200).json({
         ok: true, created: result.created, inspectionId: payload.inspectionId,
         extinguishersReceived: payload.extinguishers?.length ?? 0,
         hydrantsReceived: payload.hydrants?.length ?? 0,
         firePumpFormsReceived: payload.firePumps?.length ?? 0,
+        alarmFormsReceived: payload.alarms ? 4 : 0,
+        ansulFormsReceived: payload.ansul ? 1 : 0,
+        alarmDevicesReceived: payload.alarms
+          ? payload.alarms.addressedDevices.items.length
+            + payload.alarms.conventionalDevices.items.length
+            + payload.alarms.notificationDevices.items.length
+          : 0,
         syncedAt: new Date().toISOString(), syncedFormatIds: result.supported,
         unsupportedFormatIds,
         syncStatus: result.supported.length === selectedLogicalFormats.length ? 'synced' : 'partial',
@@ -277,6 +299,11 @@ export function createApp(
       if (!reportData) { response.status(404).json({ ok: false, message: 'Inspection not found' }); return; }
       const evidenceFormatSelected = metadata.formatType === 'fire_pumps'
         ? ['jockey', 'electrica', 'diesel'].every((id) => reportData.inspection.selectedFormatIds.includes(id))
+        : metadata.formatType === 'alarms'
+          ? ['tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion']
+            .every((id) => reportData.inspection.selectedFormatIds.includes(id))
+        : metadata.formatType === 'ansul'
+          ? reportData.inspection.selectedFormatIds.includes('ansul_r102')
         : metadata.formatType === 'legacy'
           || reportData.inspection.selectedFormatIds.includes(metadata.formatType);
       if (!evidenceFormatSelected) {
@@ -420,7 +447,11 @@ export function createApp(
       const reportData = database.getInspectionReportData(item.inspection_id);
       const equipmentLabel = item.item_id ? (item.format_type === 'extintores'
         ? reportData?.extinguishers.find((record) => record.id === item.item_id)?.numero
-        : item.format_type === 'hidrantes' ? reportData?.hydrants.find((record) => record.id === item.item_id)?.numero : null) ?? item.item_id : null;
+        : item.format_type === 'hidrantes'
+          ? reportData?.hydrants.find((record) => record.id === item.item_id)?.numero
+          : item.format_type === 'alarms'
+            ? reportData?.alarms.items.find((record) => record.id === item.item_id)?.identifier
+            : null) ?? item.item_id : null;
       return {
         id: item.id, formatType: item.format_type, formType: item.form_type,
         itemId: item.item_id, equipmentLabel,
@@ -467,6 +498,8 @@ export function createApp(
         signatureSignedAt: report.signature_signed_at,
         evidenceCount: report.evidence_count,
         firePumpForms: report.fire_pump_forms,
+        alarmForms: report.alarm_forms,
+        ansulForm: report.ansul_form,
         templateVersion: report.template_version,
         companyName: report.company_name,
         inspectionDate: report.inspection_date,

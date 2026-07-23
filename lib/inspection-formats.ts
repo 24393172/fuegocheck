@@ -1,5 +1,6 @@
 import { ADDITIONAL_SCHEMAS, INSPECTION_SCHEMAS, PUMP_SCHEMAS } from '../schemas';
 import { FormSchema } from '../types/form.types';
+import { ALARM_FORMAT_ID, ALARM_MOBILE_IDS } from './alarms';
 
 export const PUMPS_FORMAT_ID = 'bombas';
 
@@ -19,7 +20,14 @@ export const INSPECTION_FORMAT_OPTIONS: InspectionFormatOption[] = [
     schemaIds: PUMP_SCHEMAS.map((schema) => schema.id),
     templateType: 'pump',
   },
-  ...ADDITIONAL_SCHEMAS.map((schema) => ({
+  {
+    id: ALARM_FORMAT_ID,
+    name: 'Alarmas y detección',
+    description: 'Tablero y dispositivos del sistema',
+    schemaIds: [...ALARM_MOBILE_IDS],
+    templateType: 'alarm',
+  },
+  ...ADDITIONAL_SCHEMAS.filter((schema) => schema.templateType !== 'alarm').map((schema) => ({
     id: schema.id,
     name: schema.name,
     description: schema.templateType === 'alarm'
@@ -45,9 +53,15 @@ export function normalizeSelectedFormatIds(value: unknown): string[] {
 
   const unique = [...new Set(raw)];
   if (unique.some((id) => PUMP_SCHEMA_IDS.includes(id))) {
-    return [
+    unique.splice(0, unique.length, ...[
       ...PUMP_SCHEMA_IDS,
       ...unique.filter((id) => !PUMP_SCHEMA_IDS.includes(id)),
+    ]);
+  }
+  if (unique.some((id) => ALARM_MOBILE_IDS.includes(id as typeof ALARM_MOBILE_IDS[number]))) {
+    return [
+      ...unique.filter((id) => !ALARM_MOBILE_IDS.includes(id as typeof ALARM_MOBILE_IDS[number])),
+      ...ALARM_MOBILE_IDS,
     ];
   }
   return unique;
@@ -63,4 +77,3 @@ export function isFormatAlreadyAdded(
 ): boolean {
   return option.schemaIds.every((id) => selectedFormatIds.includes(id));
 }
-
