@@ -61,6 +61,22 @@ export class AdminRepository {
 
       CREATE INDEX IF NOT EXISTS idx_locations_branch
       ON equipment_locations(branch_id);
+
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        id TEXT PRIMARY KEY,
+        session_token_hash TEXT NOT NULL UNIQUE,
+        username TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_sessions_token_hash
+      ON admin_sessions(session_token_hash);
+
+      CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
+      ON admin_sessions(expires_at, revoked_at);
     `);
     const locationTable = this.database.prepare(
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_locations'`
@@ -347,6 +363,57 @@ export class AdminRepository {
     return { company: this.getCompany(companyId), locations: this.listLocations(companyId) };
   }
 
+  createAdminSession(input: {
+    id: string;
+    sessionTokenHash: string;
+    username: string;
+    createdAt: string;
+    expiresAt: string;
+    lastSeenAt: string;
+  }) {
+    this.database.prepare(`
+      INSERT INTO admin_sessions (
+        id, session_token_hash, username, created_at, expires_at, last_seen_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+    `).run(
+      input.id,
+      input.sessionTokenHash,
+      input.username,
+      input.createdAt,
+      input.expiresAt,
+      input.lastSeenAt
+    );
+  }
+
+  findActiveAdminSession(sessionTokenHash: string, now: string): AdminSession | undefined {
+    return this.database.prepare(`
+      SELECT id, session_token_hash, username, created_at, expires_at, last_seen_at, revoked_at
+      FROM admin_sessions
+      WHERE session_token_hash = ? AND revoked_at IS NULL AND expires_at > ?
+    `).get(sessionTokenHash, now) as AdminSession | undefined;
+  }
+
+  touchAdminSession(id: string, lastSeenAt: string) {
+    this.database.prepare(`
+      UPDATE admin_sessions SET last_seen_at = ?
+      WHERE id = ? AND revoked_at IS NULL AND expires_at > ?
+    `).run(lastSeenAt, id, lastSeenAt);
+  }
+
+  revokeAdminSession(sessionTokenHash: string, revokedAt: string) {
+    this.database.prepare(`
+      UPDATE admin_sessions SET revoked_at = ?
+      WHERE session_token_hash = ? AND revoked_at IS NULL
+    `).run(revokedAt, sessionTokenHash);
+  }
+
+  deleteExpiredAdminSessions(now: string) {
+    this.database.prepare(`
+      DELETE FROM admin_sessions
+      WHERE expires_at <= ? OR (revoked_at IS NOT NULL AND revoked_at <= ?)
+    `).run(now, now);
+  }
+
   close() {
     this.database.close();
   }
@@ -418,6 +485,16 @@ export class AdminRepository {
   private conflict(error: unknown, message: string): Error {
     return error instanceof Error && /unique/i.test(error.message) ? new AdminConflictError(message) : error as Error;
   }
+}
+
+export interface AdminSession {
+  id: string;
+  session_token_hash: string;
+  username: string;
+  created_at: string;
+  expires_at: string;
+  last_seen_at: string;
+  revoked_at: string | null;
 }
 
 function booleanFields(row: any) {

@@ -9,6 +9,7 @@ import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { AdminRepository } from '../src/admin-repository.js';
 import { createApp } from '../src/app.js';
+import { createTestSecurityConfig } from '../src/config.js';
 import { LocalDatabase } from '../src/database.js';
 import { ExtinguisherReportService, SHEET_CLEANUP_CONFIG } from '../src/report-generator.js';
 import { FIRE_PUMP_CONFIG, FIRE_PUMP_FORM_TYPES, PumpFormType } from '../src/fire-pump-config.js';
@@ -282,7 +283,13 @@ async function testServer(context: Parameters<typeof test>[1] extends (context: 
   const database = new LocalDatabase(databasePath);
   const adminRepository = new AdminRepository(databasePath);
   const reportService = new ExtinguisherReportService(database, templatePath, path.join(directory, 'reports'));
-  const server = createApp(database, [], reportService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  const server = createApp(
+    database,
+    reportService,
+    adminRepository,
+    path.join(serverRoot, 'admin-web', 'dist'),
+    createTestSecurityConfig({ bypassAuthenticationForTests: true })
+  ).listen(0, '127.0.0.1');
   context.after(() => {
     server.close();
     adminRepository.close();
@@ -650,7 +657,13 @@ test('a generation failure keeps the inspection and records the report error', a
     path.join(directory, 'missing-template.xlsx'),
     path.join(directory, 'reports')
   );
-  const server = createApp(database, [], reportService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  const server = createApp(
+    database,
+    reportService,
+    adminRepository,
+    path.join(serverRoot, 'admin-web', 'dist'),
+    createTestSecurityConfig({ bypassAuthenticationForTests: true })
+  ).listen(0, '127.0.0.1');
   context.after(() => {
     server.close();
     adminRepository.close();
@@ -673,7 +686,8 @@ test('a generation failure keeps the inspection and records the report error', a
   const reportList = await fetch(`http://127.0.0.1:${address.port}/api/reports`);
   const reportListBody = await reportList.json() as { reports: Array<{ status: string; errorMessage: string }> };
   assert.equal(reportListBody.reports[0].status, 'error');
-  assert.match(reportListBody.reports[0].errorMessage, /template not found/i);
+  assert.equal(reportListBody.reports[0].errorMessage, 'No fue posible generar el reporte.');
+  assert.doesNotMatch(reportListBody.reports[0].errorMessage, /template|sqlite|\.xlsx|\\/i);
 });
 
 test('Ansul synchronizes atomically, is idempotent and fills the official sheet', async (context) => {
@@ -1151,7 +1165,13 @@ test('atomic sync rolls back inspection data when report generation fails', asyn
   const database = new LocalDatabase(databasePath);
   const adminRepository = new AdminRepository(databasePath);
   const reportService = new ExtinguisherReportService(database, path.join(directory, 'missing.xlsx'), path.join(directory, 'reports'));
-  const server = createApp(database, [], reportService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  const server = createApp(
+    database,
+    reportService,
+    adminRepository,
+    path.join(serverRoot, 'admin-web', 'dist'),
+    createTestSecurityConfig({ bypassAuthenticationForTests: true })
+  ).listen(0, '127.0.0.1');
   context.after(() => { server.close(); adminRepository.close(); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   await new Promise<void>((resolve) => server.once('listening', resolve));
   const address = server.address();
@@ -1194,7 +1214,13 @@ test('a failed regeneration preserves the previous valid report and exposes a wa
 
   const brokenDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-preserve-error-'));
   const brokenService = new ExtinguisherReportService(database, path.join(brokenDirectory, 'missing.xlsx'), path.join(brokenDirectory, 'reports'));
-  const brokenServer = createApp(database, [], brokenService, adminRepository, path.join(serverRoot, 'admin-web', 'dist')).listen(0, '127.0.0.1');
+  const brokenServer = createApp(
+    database,
+    brokenService,
+    adminRepository,
+    path.join(serverRoot, 'admin-web', 'dist'),
+    createTestSecurityConfig({ bypassAuthenticationForTests: true })
+  ).listen(0, '127.0.0.1');
   context.after(() => { brokenServer.close(); fs.rmSync(brokenDirectory, { recursive: true, force: true }); });
   await new Promise<void>((resolve) => brokenServer.once('listening', resolve));
   const address = brokenServer.address();

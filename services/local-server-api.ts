@@ -111,6 +111,7 @@ type ExtinguisherServerRecord = Omit<
 export interface HealthResponse {
   ok: true;
   service: 'ExtinCheck Local Server';
+  version: string;
   timestamp: string;
 }
 
@@ -169,6 +170,7 @@ export async function uploadInspectionEvidence(photo: Photo): Promise<{ id: stri
     if (photo.thumbnail_uri) form.append('thumbnail', new File(photo.thumbnail_uri));
     const response = await expoFetch(`${getLocalServerUrl()}/api/inspections/${encodeURIComponent(photo.inspection_id)}/evidence`, {
       method: 'POST', body: form, signal: controller.signal,
+      headers: authorizedHeaders(),
     });
     const body = await response.json().catch(() => null) as { message?: string; evidence?: { id: string } } | null;
     if (!response.ok || !body?.evidence?.id) throw new LocalServerApiError(
@@ -208,7 +210,7 @@ export function getLocalServerUrl(): string {
   const configured = process.env.EXPO_PUBLIC_LOCAL_SERVER_URL?.trim().replace(/\/$/, '');
   if (!configured) {
     throw new LocalServerApiError(
-      'EXPO_PUBLIC_LOCAL_SERVER_URL is not configured',
+      'El acceso al servidor local no está configurado en este dispositivo.',
       0,
       'CONFIGURATION'
     );
@@ -221,7 +223,7 @@ export function getLocalServerUrl(): string {
     }
   } catch (error) {
     throw new LocalServerApiError(
-      error instanceof Error ? error.message : 'Invalid local server URL',
+      'El acceso al servidor local no está configurado en este dispositivo.',
       0,
       'CONFIGURATION'
     );
@@ -229,17 +231,41 @@ export function getLocalServerUrl(): string {
   return configured;
 }
 
-export async function requestLocalServer<T>(path: string, init?: RequestInit): Promise<T> {
+export function getLocalApiKey(): string {
+  const configured = process.env.EXPO_PUBLIC_LOCAL_API_KEY?.trim();
+  if (!configured) {
+    throw new LocalServerApiError(
+      'El acceso al servidor local no está configurado en este dispositivo.',
+      0,
+      'CONFIGURATION'
+    );
+  }
+  return configured;
+}
+
+function requestHeaders(initial: HeadersInit | undefined, authenticated: boolean) {
+  const headers = new Headers(initial);
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
+  if (authenticated) headers.set('Authorization', `Bearer ${getLocalApiKey()}`);
+  return headers;
+}
+
+function authorizedHeaders(initial?: HeadersInit) {
+  return requestHeaders(initial, true);
+}
+
+export async function requestLocalServer<T>(
+  path: string,
+  init?: RequestInit,
+  options: { authenticated?: boolean } = {}
+): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(`${getLocalServerUrl()}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: {
-        Accept: 'application/json',
-        ...init?.headers,
-      },
+      headers: requestHeaders(init?.headers, options.authenticated !== false),
     });
     const body = await response.json().catch(() => null) as {
       message?: string;
@@ -277,9 +303,13 @@ export async function requestLocalServer<T>(path: string, init?: RequestInit): P
 
 export async function downloadOfficialReport(downloadUrl: string, reportId: string, inspectionId: string): Promise<string> {
   const uuidPattern = '[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
-  const downloadMatch = new RegExp(`^/api/reports/(${uuidPattern})/download$`, 'i').exec(downloadUrl);
+  const downloadMatch = new RegExp(
+    `^/api/mobile/inspections/([^/]+)/reports/(${uuidPattern})/download$`,
+    'i'
+  ).exec(downloadUrl);
   if (!downloadMatch || !new RegExp(`^${uuidPattern}$`, 'i').test(reportId)
-      || downloadMatch[1].toLowerCase() !== reportId.toLowerCase()) {
+      || decodeURIComponent(downloadMatch[1]) !== inspectionId
+      || downloadMatch[2].toLowerCase() !== reportId.toLowerCase()) {
     throw new LocalServerApiError('Invalid official report reference', 0, 'VALIDATION');
   }
   const shortInspectionId = inspectionId.replace(/[^a-zA-Z0-9-]/g, '').slice(0, 8);
@@ -288,7 +318,9 @@ export async function downloadOfficialReport(downloadUrl: string, reportId: stri
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await expoFetch(`${getLocalServerUrl()}${downloadUrl}`, {
-      headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+      headers: authorizedHeaders({
+        Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }),
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -328,7 +360,11 @@ export function inspectionDateToIso(value: string): string {
 }
 
 export async function checkServerHealth(): Promise<HealthResponse> {
-  const response = await requestLocalServer<HealthResponse>('/api/health');
+  const response = await requestLocalServer<HealthResponse>(
+    '/api/health',
+    undefined,
+    { authenticated: false }
+  );
   if (!response.ok || response.service !== 'ExtinCheck Local Server') {
     throw new LocalServerApiError('Unexpected health response', 0, 'SERVER');
   }

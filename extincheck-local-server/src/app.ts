@@ -1,17 +1,21 @@
 import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs';
+import helmet from 'helmet';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { ZodError } from 'zod';
 import { AdminRepository } from './admin-repository.js';
 import { createAdminRouter } from './admin-router.js';
+import { SecurityConfig } from './config.js';
 import { LocalDatabase } from './database.js';
 import { ExtinguisherReportService } from './report-generator.js';
+import { CorsOriginError, corsOriginAllowed, createSecurity } from './security.js';
 import { evidenceFinalizeSchema, evidenceMetadataSchema, extinguisherInspectionSchema, hydrantInspectionSchema, inspectionSyncSchema } from './validation.js';
 
 let syncQueue: Promise<void> = Promise.resolve();
+const SERVER_VERSION = '0.1.0';
 
 function serializeSync<T>(operation: () => Promise<T>): Promise<T> {
   const result = syncQueue.then(operation, operation);
@@ -45,12 +49,13 @@ function actualImage(buffer: Buffer): { mimeType: 'image/jpeg' | 'image/png'; wi
 
 export function createApp(
   database: LocalDatabase,
-  allowedOrigins: string[],
   reportService: ExtinguisherReportService,
   adminRepository: AdminRepository,
-  adminWebPath: string
+  adminWebPath: string,
+  securityConfig: SecurityConfig
 ) {
   const app = express();
+  const security = createSecurity(adminRepository, securityConfig);
   const signaturesDirectory = path.join(path.dirname(database.filePath), 'signatures');
   const evidenceDirectory = path.join(path.dirname(database.filePath), 'evidence');
   fs.mkdirSync(signaturesDirectory, { recursive: true });
@@ -58,15 +63,39 @@ export function createApp(
   const evidenceUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 2, fields: 4 } })
     .fields([{ name: 'file', maxCount: 1 }, { name: 'thumbnail', maxCount: 1 }]);
   app.disable('x-powered-by');
+  app.set('trust proxy', securityConfig.trustProxy);
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        baseUri: ["'self'"],
+        connectSrc: ["'self'", ...securityConfig.allowedAdminOrigins],
+        fontSrc: ["'self'", 'data:'],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        objectSrc: ["'none'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+      },
+    },
+    crossOriginResourcePolicy: { policy: 'same-origin' },
+    referrerPolicy: { policy: 'no-referrer' },
+  }));
+  app.use((request, _response, next) => {
+    if (corsOriginAllowed(request, securityConfig.allowedAdminOrigins)) {
+      next();
+      return;
+    }
+    next(new CorsOriginError('Origin not allowed'));
+  });
   app.use(cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin) || isLocalNetworkOrigin(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error('Origin not allowed by local CORS policy'));
+      callback(null, origin || false);
     },
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Accept', 'Authorization', 'Content-Type', 'X-ExtinCheck-CSRF'],
   }));
   // The request also contains inspection data, so transport overhead must be
   // larger than the validated 1 MiB decoded PNG signature limit.
@@ -76,17 +105,55 @@ export function createApp(
     response.json({
       ok: true,
       service: 'ExtinCheck Local Server',
+      version: SERVER_VERSION,
       timestamp: new Date().toISOString(),
     });
   });
 
-  app.use('/api', createAdminRouter(adminRepository));
+  app.use('/api/admin/auth', security.authRouter);
 
-  app.get('/api/mobile/catalog', (_request, response) => {
+  app.get(
+    '/api/admin/health',
+    security.adminRateLimit,
+    security.requireAdminSession,
+    (_request, response) => {
+      const summary = database.summary();
+      response.json({
+        ok: true,
+        service: 'ExtinCheck Local Server',
+        version: SERVER_VERSION,
+        environment: securityConfig.nodeEnv,
+        uptimeSeconds: Math.floor(process.uptime()),
+        database: {
+          inspections: countFromSummary(summary.inspections),
+          extinguishers: countFromSummary(summary.extinguishers),
+          hydrants: countFromSummary(summary.hydrants),
+          reports: summary.reports.length,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+  );
+
+  app.use(
+    '/api',
+    createAdminRouter(
+      adminRepository,
+      security.requireAdminSession,
+      security.requireAdminCsrf,
+      security.adminRateLimit
+    )
+  );
+
+  app.get('/api/mobile/catalog', security.requireMobileToken, (_request, response) => {
     response.json(adminRepository.mobileCatalog());
   });
 
-  app.post('/api/inspections/extinguishers', async (request, response, next) => {
+  app.post(
+    '/api/inspections/extinguishers',
+    security.syncRateLimit,
+    security.requireMobileToken,
+    async (request, response, next) => {
     try {
       const payload = extinguisherInspectionSchema.parse(request.body);
       const result = database.upsertInspection(payload);
@@ -99,12 +166,12 @@ export function createApp(
           report: {
             id: report.id,
             filename: report.filename,
-            downloadUrl: `/api/reports/${report.id}/download`,
+            downloadUrl: mobileReportUrl(payload.inspectionId, report.id),
             generatedAt: report.generated_at,
           },
         });
       } catch (generationError) {
-        console.error('[server] Inspection saved, but report generation failed:', generationError);
+        logInternalError(securityConfig, 'Extinguisher report generation failed', generationError);
         response.status(500).json({
           ok: false,
           inspectionSaved: true,
@@ -123,9 +190,14 @@ export function createApp(
       }
       next(error);
     }
-  });
+    }
+  );
 
-  app.post('/api/inspections/hydrants', async (request, response, next) => {
+  app.post(
+    '/api/inspections/hydrants',
+    security.syncRateLimit,
+    security.requireMobileToken,
+    async (request, response, next) => {
     try {
       const payload = hydrantInspectionSchema.parse(request.body);
       const result = database.upsertHydrantInspection(payload);
@@ -138,12 +210,12 @@ export function createApp(
           report: {
             id: report.id,
             filename: report.filename,
-            downloadUrl: `/api/reports/${report.id}/download`,
+            downloadUrl: mobileReportUrl(payload.inspectionId, report.id),
             generatedAt: report.generated_at,
           },
         });
       } catch (generationError) {
-        console.error('[server] Inspection saved, but report generation failed:', generationError);
+        logInternalError(securityConfig, 'Hydrant report generation failed', generationError);
         response.status(500).json({
           ok: false,
           inspectionSaved: true,
@@ -162,9 +234,14 @@ export function createApp(
       }
       next(error);
     }
-  });
+    }
+  );
 
-  app.post('/api/inspections/sync', async (request, response, next) => {
+  app.post(
+    '/api/inspections/sync',
+    security.syncRateLimit,
+    security.requireMobileToken,
+    async (request, response, next) => {
     let payload: ReturnType<typeof inspectionSyncSchema.parse>;
     try {
       payload = inspectionSyncSchema.parse(request.body);
@@ -229,7 +306,9 @@ export function createApp(
               && previousSignature.file_path !== newSignaturePath
               && isInsideDirectory(previousSignature.file_path, signaturesDirectory)) {
             try { fs.rmSync(previousSignature.file_path, { force: true }); }
-            catch (cleanupError) { console.error('[server] Previous signature cleanup failed:', cleanupError); }
+            catch (cleanupError) {
+              logInternalError(securityConfig, 'Previous signature cleanup failed', cleanupError);
+            }
           }
           return { created, supported, report };
         } catch (error) {
@@ -277,18 +356,25 @@ export function createApp(
         syncStatus: result.supported.length === selectedLogicalFormats.length ? 'synced' : 'partial',
         report: result.report ? {
           id: result.report.id, filename: result.report.filename,
-          downloadUrl: `/api/reports/${result.report.id}/download`, generatedAt: result.report.generated_at,
+          downloadUrl: mobileReportUrl(payload.inspectionId, result.report.id),
+          generatedAt: result.report.generated_at,
         } : null,
         evidencePending: payload.evidenceManifest?.filter((item) => !database.getEvidence(item.evidenceId)).length ?? 0,
         missingEvidenceIds: payload.evidenceManifest?.filter((item) => !database.getEvidence(item.evidenceId)).map((item) => item.evidenceId) ?? [],
       });
     } catch (error) {
-      console.error('[server] Atomic inspection synchronization failed:', error);
+      logInternalError(securityConfig, 'Atomic inspection synchronization failed', error);
       response.status(500).json({ ok: false, inspectionSaved: false, message: 'Inspection synchronization failed' });
     }
-  });
+    }
+  );
 
-  app.post('/api/inspections/:inspectionId/evidence', evidenceUpload, async (request, response) => {
+  app.post(
+    '/api/inspections/:inspectionId/evidence',
+    security.evidenceRateLimit,
+    security.requireMobileToken,
+    evidenceUpload,
+    async (request, response) => {
     try {
       const metadata = evidenceMetadataSchema.parse(JSON.parse(String(request.body.metadata ?? 'null')));
       if (metadata.evidenceId.length > 128 || request.params.inspectionId !== String(request.body.inspectionId ?? '')) {
@@ -354,8 +440,9 @@ export function createApp(
           location_name_snapshot: metadata.locationNameSnapshot, captured_at: metadata.capturedAt,
         });
         response.json({ ok: true, created: false, evidence: {
-          id: saved.id, checksum: saved.checksum, fileUrl: `/api/evidence/${saved.id}/file`,
-          thumbnailUrl: `/api/evidence/${saved.id}/thumbnail`,
+          id: saved.id, checksum: saved.checksum,
+          fileUrl: `/api/admin/evidence/${saved.id}/file`,
+          thumbnailUrl: `/api/admin/evidence/${saved.id}/thumbnail`,
         } }); return;
       }
       const inspectionFolder = createHash('sha256').update(inspectionId).digest('hex').slice(0, 32);
@@ -389,8 +476,9 @@ export function createApp(
           }
         }
         response.status(existing ? 200 : 201).json({ ok: true, created: !existing, evidence: {
-          id: saved.id, checksum: saved.checksum, fileUrl: `/api/evidence/${saved.id}/file`,
-          thumbnailUrl: `/api/evidence/${saved.id}/thumbnail`,
+          id: saved.id, checksum: saved.checksum,
+          fileUrl: `/api/admin/evidence/${saved.id}/file`,
+          thumbnailUrl: `/api/admin/evidence/${saved.id}/thumbnail`,
         } });
       } catch (error) {
         if (transactionStarted) database.rollbackSync();
@@ -403,47 +491,68 @@ export function createApp(
       if (error instanceof ZodError || error instanceof SyntaxError) {
         response.status(400).json({ ok: false, message: 'Invalid evidence metadata' }); return;
       }
-      console.error('[server] Evidence upload failed:', error);
+      logInternalError(securityConfig, 'Evidence upload failed', error);
       response.status(500).json({ ok: false, message: 'Evidence upload failed' });
     }
-  });
+    }
+  );
 
-  app.delete('/api/inspections/:inspectionId/evidence/:evidenceId', async (request, response) => {
-    const evidence = database.getEvidence(request.params.evidenceId);
-    if (!evidence || evidence.inspection_id !== request.params.inspectionId) {
+  app.delete(
+    '/api/inspections/:inspectionId/evidence/:evidenceId',
+    security.evidenceRateLimit,
+    security.requireMobileToken,
+    async (request, response) => {
+    const inspectionId = routeParam(request.params.inspectionId);
+    const evidenceId = routeParam(request.params.evidenceId);
+    const evidence = database.getEvidence(evidenceId);
+    if (!evidence || evidence.inspection_id !== inspectionId) {
       response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
     }
     database.beginSync();
-    try { database.deleteEvidence(request.params.inspectionId, request.params.evidenceId); database.commitSync(); }
+    try { database.deleteEvidence(inspectionId, evidenceId); database.commitSync(); }
     catch (error) { database.rollbackSync(); throw error; }
     for (const candidate of [evidence.file_path, evidence.thumbnail_path]) {
       if (candidate && isInsideDirectory(candidate, evidenceDirectory)) fs.rmSync(candidate, { force: true });
     }
     response.json({ ok: true, deleted: true });
-  });
+    }
+  );
 
-  app.post('/api/inspections/:inspectionId/evidence/finalize', async (request, response) => {
+  app.post(
+    '/api/inspections/:inspectionId/evidence/finalize',
+    security.evidenceRateLimit,
+    security.requireMobileToken,
+    async (request, response) => {
     try {
       const payload = evidenceFinalizeSchema.parse(request.body);
-      const actual = database.listInspectionEvidence(request.params.inspectionId).map((item) => item.id).sort();
+      const inspectionId = routeParam(request.params.inspectionId);
+      const actual = database.listInspectionEvidence(inspectionId).map((item) => item.id).sort();
       const expected = [...payload.evidenceIds].sort();
       if (JSON.stringify(actual) !== JSON.stringify(expected)) {
         response.status(409).json({ ok: false, message: 'Evidence synchronization is incomplete', expected: expected.length, received: actual.length }); return;
       }
-      const report = await serializeSync(() => reportService.generate(request.params.inspectionId));
+      const report = await serializeSync(() => reportService.generate(inspectionId));
       response.json({ ok: true, evidenceCount: actual.length, report: {
-        id: report.id, filename: report.filename, downloadUrl: `/api/reports/${report.id}/download`, generatedAt: report.generated_at,
+        id: report.id, filename: report.filename,
+        downloadUrl: mobileReportUrl(inspectionId, report.id),
+        generatedAt: report.generated_at,
       } });
     } catch (error) {
       if (error instanceof ZodError) { response.status(400).json({ ok: false, message: 'Invalid evidence manifest' }); return; }
-      console.error('[server] Evidence finalization failed:', error);
+      logInternalError(securityConfig, 'Evidence finalization failed', error);
       response.status(500).json({ ok: false, message: 'Evidence finalization failed' });
     }
-  });
+    }
+  );
 
-  app.get('/api/reports/:reportId/evidence', (request, response) => {
-    if (!database.getReport(request.params.reportId)) { response.status(404).json({ ok: false, message: 'Report not found' }); return; }
-    response.json({ ok: true, evidence: database.listReportEvidence(request.params.reportId).map((item) => {
+  app.get(
+    ['/api/admin/reports/:reportId/evidence', '/api/reports/:reportId/evidence'],
+    security.adminRateLimit,
+    security.requireAdminSession,
+    (request, response) => {
+    const reportId = routeParam(request.params.reportId);
+    if (!database.getReport(reportId)) { response.status(404).json({ ok: false, message: 'Report not found' }); return; }
+    response.json({ ok: true, evidence: database.listReportEvidence(reportId).map((item) => {
       const reportData = database.getInspectionReportData(item.inspection_id);
       const equipmentLabel = item.item_id ? (item.format_type === 'extintores'
         ? reportData?.extinguishers.find((record) => record.id === item.item_id)?.numero
@@ -457,29 +566,45 @@ export function createApp(
         itemId: item.item_id, equipmentLabel,
         fieldKey: item.field_key, caption: item.caption, locationNameSnapshot: item.location_name_snapshot,
         capturedAt: item.captured_at, width: item.width, height: item.height,
-        fileUrl: `/api/evidence/${item.id}/file`, thumbnailUrl: `/api/evidence/${item.id}/thumbnail`,
+        fileUrl: `/api/admin/evidence/${item.id}/file`,
+        thumbnailUrl: `/api/admin/evidence/${item.id}/thumbnail`,
       };
     }) });
-  });
+    }
+  );
 
-  app.get('/api/evidence/:id/file', (request, response) => {
-    const evidence = database.getEvidence(request.params.id);
+  app.get(
+    ['/api/admin/evidence/:id/file', '/api/evidence/:id/file'],
+    security.adminRateLimit,
+    security.requireAdminSession,
+    (request, response) => {
+    const evidence = database.getEvidence(routeParam(request.params.id));
     if (!evidence || !isInsideDirectory(evidence.file_path, evidenceDirectory) || !fs.existsSync(evidence.file_path)) {
       response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
     }
     response.type(evidence.mime_type).sendFile(path.resolve(evidence.file_path));
-  });
+    }
+  );
 
-  app.get('/api/evidence/:id/thumbnail', (request, response) => {
-    const evidence = database.getEvidence(request.params.id);
+  app.get(
+    ['/api/admin/evidence/:id/thumbnail', '/api/evidence/:id/thumbnail'],
+    security.adminRateLimit,
+    security.requireAdminSession,
+    (request, response) => {
+    const evidence = database.getEvidence(routeParam(request.params.id));
     const target = evidence?.thumbnail_path || evidence?.file_path;
     if (!evidence || !target || !isInsideDirectory(target, evidenceDirectory) || !fs.existsSync(target)) {
       response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
     }
     response.type(evidence.mime_type).sendFile(path.resolve(target));
-  });
+    }
+  );
 
-  app.get('/api/reports', (_request, response) => {
+  app.get(
+    ['/api/admin/reports', '/api/reports'],
+    security.adminRateLimit,
+    security.requireAdminSession,
+    (_request, response) => {
     response.json({
       ok: true,
       reports: database.listReports().map((report) => ({
@@ -489,10 +614,12 @@ export function createApp(
         filename: report.filename,
         generatedAt: report.generated_at,
         status: report.status,
-        errorMessage: report.error_message,
+        errorMessage: report.status === 'error' ? 'No fue posible generar el reporte.' : null,
         lastAttemptAt: report.last_attempt_at,
         lastAttemptStatus: report.last_attempt_status,
-        lastAttemptError: report.last_attempt_error,
+        lastAttemptError: report.last_attempt_status === 'error'
+          ? 'No fue posible completar el último intento de generación.'
+          : null,
         signatureAvailable: report.signature_available === 1,
         signatureSignerName: report.signature_signer_name,
         signatureSignedAt: report.signature_signed_at,
@@ -504,31 +631,65 @@ export function createApp(
         companyName: report.company_name,
         inspectionDate: report.inspection_date,
         formats: report.formats,
-        downloadUrl: report.status === 'generated' ? `/api/reports/${report.id}/download` : null,
+        downloadUrl: report.status === 'generated'
+          ? `/api/admin/reports/${report.id}/download`
+          : null,
       })),
     });
-  });
+    }
+  );
 
-  app.get('/api/reports/:id/download', (request, response) => {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.params.id)) {
+  app.get(
+    ['/api/admin/reports/:id/download', '/api/reports/:id/download'],
+    security.downloadRateLimit,
+    security.requireAdminSession,
+    (request, response) => {
+    const reportId = routeParam(request.params.id);
+    if (!isUuid(reportId)) {
       response.status(404).json({ ok: false, message: 'Report not found' });
       return;
     }
-    const download = reportService.resolveDownload(request.params.id);
+    const download = reportService.resolveDownload(reportId);
     if (!download) {
       response.status(404).json({ ok: false, message: 'Report not found' });
       return;
     }
     response.download(download.filePath, download.report.filename);
-  });
+    }
+  );
+
+  app.get(
+    '/api/mobile/inspections/:inspectionId/reports/:id/download',
+    security.downloadRateLimit,
+    security.requireMobileToken,
+    (request, response) => {
+      const reportId = routeParam(request.params.id);
+      const inspectionId = routeParam(request.params.inspectionId);
+      if (!isUuid(reportId)) {
+        response.status(404).json({ ok: false, message: 'Report not found' });
+        return;
+      }
+      const report = database.getReport(reportId);
+      if (!report || report.inspection_id !== inspectionId) {
+        response.status(404).json({ ok: false, message: 'Report not found' });
+        return;
+      }
+      const download = reportService.resolveDownload(reportId);
+      if (!download) {
+        response.status(404).json({ ok: false, message: 'Report not found' });
+        return;
+      }
+      response.download(download.filePath, download.report.filename);
+    }
+  );
 
   if (fs.existsSync(adminWebPath)) {
     app.use('/admin', express.static(adminWebPath, { index: false }));
-    app.get(/^\/admin(?:\/.*)?$/, (_request, response) => {
+    app.get(['/admin', '/admin/{*path}'], (_request, response) => {
       response.sendFile(path.join(adminWebPath, 'index.html'));
     });
   } else {
-    app.get(/^\/admin(?:\/.*)?$/, (_request, response) => {
+    app.get(['/admin', '/admin/{*path}'], (_request, response) => {
       response.status(503).send('El panel administrativo aún no ha sido compilado. Ejecuta npm run build.');
     });
   }
@@ -543,26 +704,45 @@ export function createApp(
         .json({ ok: false, message: 'Invalid or oversized evidence upload' });
       return;
     }
+    if (error instanceof CorsOriginError) {
+      response.status(403).json({ ok: false, message: 'Origin not allowed.' });
+      return;
+    }
     if ((error as Error & { type?: string }).type === 'entity.too.large') {
       response.status(413).json({ ok: false, message: 'Inspection payload is too large' });
       return;
     }
-    console.error('[server] Request failed:', error);
+    logInternalError(securityConfig, 'Request failed', error);
     response.status(500).json({ ok: false, message: 'Local server error' });
   });
   return app;
 }
 
-function isLocalNetworkOrigin(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
-    const host = url.hostname.toLocaleLowerCase();
-    if (host === 'localhost' || host === '::1' || host === '[::1]' || host.startsWith('127.')) return true;
-    if (host.startsWith('10.') || host.startsWith('192.168.')) return true;
-    const match = /^172\.(\d{1,2})\./.exec(host);
-    return Boolean(match && Number(match[1]) >= 16 && Number(match[1]) <= 31);
-  } catch {
-    return false;
+function mobileReportUrl(inspectionId: string, reportId: string) {
+  return `/api/mobile/inspections/${encodeURIComponent(inspectionId)}/reports/${reportId}/download`;
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function routeParam(value: string | string[]) {
+  return Array.isArray(value) ? value[0] ?? '' : value;
+}
+
+function countFromSummary(value: unknown) {
+  if (!value || typeof value !== 'object' || !('count' in value)) return 0;
+  const count = Number((value as { count: unknown }).count);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function logInternalError(config: SecurityConfig, context: string, error: unknown) {
+  if (config.nodeEnv === 'development') {
+    console.error(`[server] ${context}:`, error);
+    return;
+  }
+  if (config.nodeEnv !== 'test') {
+    const kind = error instanceof Error ? error.name : 'UnknownError';
+    console.error(`[server] ${context} (${kind})`);
   }
 }

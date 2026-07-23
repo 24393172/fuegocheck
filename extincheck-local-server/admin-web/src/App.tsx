@@ -1,11 +1,96 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
-import { api, query } from './api';
+import {
+  AdminSession,
+  ApiError,
+  api,
+  getSession,
+  login,
+  logout,
+  onUnauthorized,
+  query,
+  setAdminSession,
+} from './api';
 import { Branch, Company, EquipmentType, Evidence, Location, Report } from './types';
 
 type View = 'companies' | 'locations' | 'reports';
 type Notice = { kind: 'success' | 'error'; text: string } | null;
 
 export function App() {
+  const [auth, setAuth] = useState<
+    { state: 'checking' } | { state: 'anonymous' } | { state: 'authenticated'; session: AdminSession }
+  >({ state: 'checking' });
+
+  useEffect(() => {
+    onUnauthorized(() => {
+      setAdminSession(null);
+      setAuth({ state: 'anonymous' });
+    });
+    getSession()
+      .then((session) => setAuth({ state: 'authenticated', session }))
+      .catch(() => setAuth({ state: 'anonymous' }));
+    return () => onUnauthorized(null);
+  }, []);
+
+  useEffect(() => {
+    if (auth.state !== 'authenticated' || !auth.session.expiresAt) return;
+    const remaining = new Date(auth.session.expiresAt).getTime() - Date.now();
+    if (remaining <= 0) {
+      setAdminSession(null);
+      setAuth({ state: 'anonymous' });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setAdminSession(null);
+      setAuth({ state: 'anonymous' });
+    }, Math.min(remaining + 250, 2_147_483_647));
+    return () => window.clearTimeout(timer);
+  }, [auth]);
+
+  if (auth.state === 'checking') {
+    return <div className="auth-shell"><div className="auth-card"><Loading /></div></div>;
+  }
+  if (auth.state === 'anonymous') {
+    return <LoginView onAuthenticated={(session) => setAuth({ state: 'authenticated', session })} />;
+  }
+  return <AdminPanel session={auth.session} onSignedOut={() => setAuth({ state: 'anonymous' })} />;
+}
+
+function LoginView({ onAuthenticated }: { onAuthenticated: (session: AdminSession) => void }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      onAuthenticated(await login(username, password));
+    } catch (caught) {
+      setError(caught instanceof ApiError && caught.status === 429
+        ? 'Demasiados intentos. Espera unos minutos e inténtalo de nuevo.'
+        : 'Usuario o contraseña incorrectos.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  return <main className="auth-shell">
+    <section className="auth-card" aria-labelledby="login-title">
+      <div className="auth-brand"><span className="brand-mark">E</span><div><strong>ExtinCheck</strong><small>Administración local</small></div></div>
+      <span className="eyebrow">Acceso protegido</span>
+      <h1 id="login-title">Iniciar sesión</h1>
+      <p>Ingresa las credenciales configuradas en el servidor local.</p>
+      <form className="auth-form" onSubmit={submit}>
+        <Field label="Usuario"><input autoFocus autoComplete="username" required value={username} onChange={(event) => setUsername(event.target.value)} /></Field>
+        <Field label="Contraseña"><input type="password" autoComplete="current-password" required value={password} onChange={(event) => setPassword(event.target.value)} /></Field>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button className="primary" disabled={loading}>{loading ? 'Validando…' : 'Iniciar sesión'}</button>
+      </form>
+    </section>
+  </main>;
+}
+
+function AdminPanel({ session, onSignedOut }: { session: AdminSession; onSignedOut: () => void }) {
   const [view, setView] = useState<View>('companies');
   const [notice, setNotice] = useState<Notice>(null);
   const notify = (kind: 'success' | 'error', text: string) => {
@@ -24,7 +109,7 @@ export function App() {
         <div className="server-badge"><span /> Servidor local</div>
       </aside>
       <main className="main-content">
-        <header className="topbar"><div><span className="eyebrow">Panel administrativo</span><h1>{viewTitle(view)}</h1></div><div className="local-pill">Red local</div></header>
+        <header className="topbar"><div><span className="eyebrow">Panel administrativo</span><h1>{viewTitle(view)}</h1></div><div className="session-actions"><span className="local-pill">{session.username}</span><button onClick={() => void logout().finally(onSignedOut)}>Cerrar sesión</button></div></header>
         {notice && <div role="status" className={`notice ${notice.kind}`}>{notice.text}</div>}
         {view === 'companies' && <CompaniesView notify={notify} />}
         {view === 'locations' && <LocationsView notify={notify} />}
@@ -142,10 +227,10 @@ function LocationModal({ company, branches, type, location, onClose, onSaved }: 
 function ReportsView({ notify }: { notify: Notify }) {
   const [reports, setReports] = useState<Report[]>([]); const [loading, setLoading] = useState(true);
   const [company, setCompany] = useState(''); const [date, setDate] = useState(''); const [status, setStatus] = useState(''); const [format, setFormat] = useState('');
-  useEffect(() => { api<{ reports: Report[] }>('/api/reports').then((result) => setReports(result.reports)).catch((error) => notify('error', message(error))).finally(() => setLoading(false)); }, []);
+  useEffect(() => { api<{ reports: Report[] }>('/api/admin/reports').then((result) => setReports(result.reports)).catch((error) => notify('error', message(error))).finally(() => setLoading(false)); }, []);
   const companies = useMemo(() => [...new Set(reports.map((report) => report.companyName))].sort(), [reports]);
   const visible = reports.filter((report) => (!company || report.companyName === company) && (!date || report.inspectionDate === date) && (!status || report.status === status) && (!format || report.formats.includes(format)));
-  return <section><div className="section-heading"><div><h2>Reportes Excel</h2><p>Consulta los archivos generales generados por las inspecciones sincronizadas.</p></div><span className="count-pill">{visible.length} reportes</span></div><div className="toolbar card report-filters"><select aria-label="Filtrar reportes por empresa" value={company} onChange={(event) => setCompany(event.target.value)}><option value="">Todas las empresas</option>{companies.map((name) => <option key={name}>{name}</option>)}</select><input aria-label="Filtrar reportes por fecha" type="date" value={date} onChange={(event) => setDate(event.target.value)} /><select aria-label="Filtrar reportes por estado" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">Todos los estados</option><option value="generated">Generados</option><option value="error">Con error</option></select><select aria-label="Filtrar reportes por formato" value={format} onChange={(event) => setFormat(event.target.value)}><option value="">Todos los formatos</option><option value="Extintores">Extintores</option><option value="Hidrantes">Hidrantes</option><option value="Bombas">Bombas</option><option value="Alarmas">Alarmas</option><option value="Ansul R-102">Ansul R-102</option></select></div><div className="card table-card">{loading ? <Loading /> : <div className="table-wrap"><table><thead><tr><th>Empresa</th><th>Inspección</th><th>Formatos</th><th>Generado</th><th>Estado</th><th>Firma</th><th>Archivo</th><th>Acción</th></tr></thead><tbody>{visible.map((report) => <tr key={report.id}><td><strong>{report.companyName}</strong></td><td>{displayDate(report.inspectionDate)}</td><td><span className="format-badge">{report.formats || 'Sin formatos'}</span><PumpSummary report={report} /><AlarmSummary report={report} /><AnsulSummary report={report} /></td><td>{displayDateTime(report.generatedAt)}</td><td><ReportStatus report={report} /></td><td><SignatureStatus report={report} /></td><td className="filename">{report.filename}</td><td>{report.downloadUrl ? <a className="download-button" href={`/api/reports/${report.id}/download`}>Descargar reporte</a> : '—'}</td></tr>)}</tbody></table>{!visible.length && <Empty text="No hay reportes con estos filtros." />}</div>}</div></section>;
+  return <section><div className="section-heading"><div><h2>Reportes Excel</h2><p>Consulta los archivos generales generados por las inspecciones sincronizadas.</p></div><span className="count-pill">{visible.length} reportes</span></div><div className="toolbar card report-filters"><select aria-label="Filtrar reportes por empresa" value={company} onChange={(event) => setCompany(event.target.value)}><option value="">Todas las empresas</option>{companies.map((name) => <option key={name}>{name}</option>)}</select><input aria-label="Filtrar reportes por fecha" type="date" value={date} onChange={(event) => setDate(event.target.value)} /><select aria-label="Filtrar reportes por estado" value={status} onChange={(event) => setStatus(event.target.value)}><option value="">Todos los estados</option><option value="generated">Generados</option><option value="error">Con error</option></select><select aria-label="Filtrar reportes por formato" value={format} onChange={(event) => setFormat(event.target.value)}><option value="">Todos los formatos</option><option value="Extintores">Extintores</option><option value="Hidrantes">Hidrantes</option><option value="Bombas">Bombas</option><option value="Alarmas">Alarmas</option><option value="Ansul R-102">Ansul R-102</option></select></div><div className="card table-card">{loading ? <Loading /> : <div className="table-wrap"><table><thead><tr><th>Empresa</th><th>Inspección</th><th>Formatos</th><th>Generado</th><th>Estado</th><th>Firma</th><th>Archivo</th><th>Acción</th></tr></thead><tbody>{visible.map((report) => <tr key={report.id}><td><strong>{report.companyName}</strong></td><td>{displayDate(report.inspectionDate)}</td><td><span className="format-badge">{report.formats || 'Sin formatos'}</span><PumpSummary report={report} /><AlarmSummary report={report} /><AnsulSummary report={report} /></td><td>{displayDateTime(report.generatedAt)}</td><td><ReportStatus report={report} /></td><td><SignatureStatus report={report} /></td><td className="filename">{report.filename}</td><td>{report.downloadUrl ? <a className="download-button" href={report.downloadUrl}>Descargar reporte</a> : '—'}</td></tr>)}</tbody></table>{!visible.length && <Empty text="No hay reportes con estos filtros." />}</div>}</div></section>;
 }
 
 function PumpSummary({ report }: { report: Report }) {
@@ -195,7 +280,7 @@ function SignatureStatus({ report }: { report: Report }) { return <div><strong>{
 
 function EvidenceSummary({ report }: { report: Report }) {
   const [open, setOpen] = useState(false); const [items, setItems] = useState<Evidence[]>([]); const [loading, setLoading] = useState(false); const [error, setError] = useState('');
-  async function show() { setOpen(true); setLoading(true); setError(''); try { const result = await api<{ evidence: Evidence[] }>(`/api/reports/${report.id}/evidence`); setItems(result.evidence); } catch (caught) { setError(message(caught)); } finally { setLoading(false); } }
+  async function show() { setOpen(true); setLoading(true); setError(''); try { const result = await api<{ evidence: Evidence[] }>(`/api/admin/reports/${report.id}/evidence`); setItems(result.evidence); } catch (caught) { setError(message(caught)); } finally { setLoading(false); } }
   return <><button className="evidence-link" onClick={() => void show()}>Evidencias: {report.evidenceCount}</button>{open && <Modal title={`Evidencias · ${report.companyName}`} onClose={() => setOpen(false)}>{loading ? <Loading /> : error ? <p className="form-error">{error}</p> : items.length === 0 ? <Empty text="Este reporte no tiene evidencias." /> : <div className="evidence-grid">{items.map((item) => <article key={item.id} className="evidence-card"><a href={item.fileUrl} target="_blank" rel="noreferrer"><img src={item.thumbnailUrl} alt={item.caption || 'Evidencia de inspección'} /></a><div><strong>{item.formatType === 'extintores' ? 'Extintores' : item.formatType === 'hidrantes' ? 'Hidrantes' : item.formatType === 'fire_pumps' ? `Bombas · ${item.formType?.replace('pump_', '') ?? ''}` : item.formatType === 'alarms' ? `Alarmas · ${item.formType?.replaceAll('_', ' ') ?? ''}` : item.formatType === 'ansul' ? 'Ansul R-102' : item.formatType}</strong><small>{item.equipmentLabel ? `Equipo ${item.equipmentLabel}` : 'Evidencia general'}</small><small>{item.locationNameSnapshot || 'Sin ubicación'}</small><p>{item.caption || 'Sin descripción'}</p><small>{displayDateTime(item.capturedAt)}</small><a className="evidence-open" href={item.fileUrl} target="_blank" rel="noreferrer">Abrir imagen</a></div></article>)}</div>}</Modal>}</>;
 }
 function Status({ active }: { active: boolean }) { return <span className={active ? 'status active' : 'status inactive'}><i />{active ? 'Activa' : 'Inactiva'}</span>; }

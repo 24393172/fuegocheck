@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { RequestHandler, Router } from 'express';
 import { ZodError } from 'zod';
 import {
   AdminConflictError,
@@ -6,7 +6,6 @@ import {
   AdminRepository,
   AdminValidationError,
 } from './admin-repository.js';
-import { requireLocalAdmin } from './admin-auth.js';
 import {
   branchInputSchema,
   companyInputSchema,
@@ -16,9 +15,19 @@ import {
   uuidSchema,
 } from './admin-validation.js';
 
-export function createAdminRouter(repository: AdminRepository) {
+export function createAdminRouter(
+  repository: AdminRepository,
+  requireAdminSession: RequestHandler,
+  requireAdminCsrf: RequestHandler,
+  rateLimit: RequestHandler
+) {
   const router = Router();
-  router.use(requireLocalAdmin);
+  router.use(
+    ['/companies', '/branches', '/locations'],
+    rateLimit,
+    requireAdminSession,
+    requireAdminCsrf
+  );
 
   router.get('/companies', (request, response) => {
     response.json({

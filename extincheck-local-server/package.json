@@ -15,12 +15,17 @@
     "start": "node dist/index.js",
     "test": "tsx --test test/*.test.ts",
     "inspect": "tsx src/inspect.ts",
-    "seed": "tsx src/seed.ts"
+    "seed": "tsx src/seed.ts",
+    "admin:hash-password": "tsx src/security-tools.ts hash-password",
+    "security:generate-secret": "tsx src/security-tools.ts generate-secret",
+    "security:generate-api-key": "tsx src/security-tools.ts generate-api-key"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "helmet": "^8.3.0",
     "jszip": "^3.10.1",
     "multer": "^2.2.0",
     "zod": "^4.1.12"

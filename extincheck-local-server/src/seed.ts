@@ -1,6 +1,7 @@
 import { AdminRepository } from './admin-repository.js';
-import { config } from './config.js';
+import { loadConfig } from './config.js';
 
+const config = loadConfig();
 const repository = new AdminRepository(config.databasePath);
 try {
   console.log(JSON.stringify(repository.seedExampleData(), null, 2));
