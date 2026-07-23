@@ -14,12 +14,14 @@ import {
   statusInputSchema,
   uuidSchema,
 } from './admin-validation.js';
+import { MaintenanceCoordinator } from './maintenance.js';
 
 export function createAdminRouter(
   repository: AdminRepository,
   requireAdminSession: RequestHandler,
   requireAdminCsrf: RequestHandler,
-  rateLimit: RequestHandler
+  rateLimit: RequestHandler,
+  coordinator?: MaintenanceCoordinator
 ) {
   const router = Router();
   router.use(
@@ -28,6 +30,19 @@ export function createAdminRouter(
     requireAdminSession,
     requireAdminCsrf
   );
+  if (coordinator) {
+    router.use(['/companies', '/branches', '/locations'], (request, response, next) => {
+      if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        next();
+        return;
+      }
+      void coordinator.runWrite(() => new Promise<void>((resolve, reject) => {
+        response.once('finish', resolve);
+        response.once('close', resolve);
+        try { next(); } catch (error) { reject(error); }
+      })).catch(next);
+    });
+  }
 
   router.get('/companies', (request, response) => {
     response.json({

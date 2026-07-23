@@ -372,8 +372,9 @@ async function addSignaturesWorksheet(zip: JSZip, data: InspectionReportData): P
   let pictureXml = '';
   let drawingRelationships = '';
   if (signature) {
-    if (!fs.existsSync(signature.file_path)) throw new Error('Stored technician signature file was not found');
-    const bytes = fs.readFileSync(signature.file_path);
+    const signaturePath = data.resolveStoredPath(signature.file_path);
+    if (!fs.existsSync(signaturePath)) throw new Error('Stored technician signature file was not found');
+    const bytes = fs.readFileSync(signaturePath);
     const dimensions = pngSize(bytes);
     const maxWidth = 4_500_000;
     const maxHeight = 1_500_000;
@@ -456,7 +457,8 @@ async function addEvidenceWorksheet(zip: JSZip, data: InspectionReportData): Pro
     merges.push('A10:AI10');
   }
   data.evidence.forEach((evidence, index) => {
-    if (!fs.existsSync(evidence.file_path)) throw new Error(`Evidence file was not found: ${evidence.id}`);
+    const evidencePath = data.resolveStoredPath(evidence.file_path);
+    if (!fs.existsSync(evidencePath)) throw new Error(`Evidence file was not found: ${evidence.id}`);
     const pair = Math.floor(index / 2);
     const left = index % 2 === 0;
     const startRow = 9 + pair * 19;
@@ -482,7 +484,7 @@ async function addEvidenceWorksheet(zip: JSZip, data: InspectionReportData): Pro
     merges.push(`${left ? 'A' : 'S'}${startRow + 2}:${left ? 'Q' : 'AI'}${startRow + 2}`);
     const extension = evidence.mime_type === 'image/png' ? 'png' : 'jpg';
     const imageName = `evidence${sheetNumber}-${index + 1}.${extension}`;
-    zip.file(`xl/media/${imageName}`, fs.readFileSync(evidence.file_path));
+    zip.file(`xl/media/${imageName}`, fs.readFileSync(evidencePath));
     const maxWidth = 3_400_000;
     const maxHeight = 1_500_000;
     const scale = Math.min(maxWidth / evidence.width, maxHeight / evidence.height);
@@ -560,7 +562,8 @@ export class ExtinguisherReportService {
     const filename = this.availableFilename(data, previous);
     const targetPath = path.join(this.reportsDirectory, filename);
     const temporaryPath = path.join(this.reportsDirectory, `.${randomUUID()}.tmp`);
-    const backupPath = previous?.file_path === targetPath && fs.existsSync(targetPath)
+    const previousPath = previous?.file_path ? this.database.resolvePath(previous.file_path) : null;
+    const backupPath = previousPath === targetPath && fs.existsSync(targetPath)
       ? path.join(this.reportsDirectory, `.${randomUUID()}.backup`)
       : null;
 
@@ -818,7 +821,7 @@ export class ExtinguisherReportService {
         fs.copyFileSync(backupPath, targetPath);
         fs.rmSync(backupPath, { force: true });
       }
-      if (previous?.file_path !== targetPath && isInsideDirectory(targetPath, this.reportsDirectory)) {
+      if (previousPath !== targetPath && isInsideDirectory(targetPath, this.reportsDirectory)) {
         fs.rmSync(targetPath, { force: true });
       }
       const message = error instanceof Error ? error.message.slice(0, 2000) : 'Unknown report generation error';
@@ -837,7 +840,7 @@ export class ExtinguisherReportService {
   resolveDownload(reportId: string): { report: GeneratedReport; filePath: string } | undefined {
     const report = this.database.getReport(reportId);
     if (!report || report.status !== 'generated' || !report.file_path) return undefined;
-    const filePath = path.resolve(report.file_path);
+    const filePath = this.database.resolvePath(report.file_path);
     if (!isInsideDirectory(filePath, this.reportsDirectory) || !fs.existsSync(filePath)) return undefined;
     return { report, filePath };
   }

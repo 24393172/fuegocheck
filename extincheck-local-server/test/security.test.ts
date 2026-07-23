@@ -11,6 +11,10 @@ import { createApp } from '../src/app.js';
 import { createTestSecurityConfig, loadConfig, SecurityConfig } from '../src/config.js';
 import { LocalDatabase } from '../src/database.js';
 import { ExtinguisherReportService } from '../src/report-generator.js';
+import { StructuredLogger } from '../src/logger.js';
+import { MaintenanceCoordinator } from '../src/maintenance.js';
+import { OperationalService } from '../src/operations.js';
+import { createStorageLayout } from '../src/storage-paths.js';
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
 const templatePath = path.join(serverRoot, 'templates', 'FORMATOS P.R. CANCUN.xlsx');
@@ -20,8 +24,17 @@ const adminPassword = 'correct horse battery staple';
 
 async function secureServer(context: any, overrides: Partial<SecurityConfig> = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'extincheck-security-'));
-  const databasePath = path.join(directory, 'test.sqlite');
-  const database = new LocalDatabase(databasePath);
+  const databasePath = path.join(directory, 'data', 'test.sqlite');
+  const storage = createStorageLayout({
+    root: directory,
+    data: path.join(directory, 'data'),
+    reports: path.join(directory, 'reports'),
+    templates: path.dirname(templatePath),
+    backups: path.join(directory, 'backups'),
+    logs: path.join(directory, 'logs'),
+    temp: path.join(directory, 'temp'),
+  });
+  const database = new LocalDatabase(databasePath, storage);
   const adminRepository = new AdminRepository(databasePath);
   const reportService = new ExtinguisherReportService(database, templatePath, path.join(directory, 'reports'));
   const security = createTestSecurityConfig({
@@ -31,12 +44,22 @@ async function secureServer(context: any, overrides: Partial<SecurityConfig> = {
     allowedAdminOrigins: [adminOrigin],
     ...overrides,
   });
+  const operations = new OperationalService(database, adminRepository, {
+    storage,
+    logLevel: 'error',
+    logRetentionDays: 7,
+    backupRetentionDays: 30,
+    minFreeDiskMb: 1,
+    tempFileMaxAgeHours: 24,
+    windowsAutostartMode: 'none',
+  }, new MaintenanceCoordinator(), new StructuredLogger(storage.logs, 'error', 7));
   const server = createApp(
     database,
     reportService,
     adminRepository,
     path.join(serverRoot, 'admin-web', 'dist'),
-    security
+    security,
+    operations
   ).listen(0, '127.0.0.1');
   context.after(() => {
     server.close();
@@ -53,6 +76,7 @@ async function secureServer(context: any, overrides: Partial<SecurityConfig> = {
     databasePath,
     adminRepository,
     security,
+    operations,
   };
 }
 
@@ -272,4 +296,50 @@ test('login rate limit blocks excessive attempts without affecting normal health
   assert.equal((await adminLogin(baseUrl, 'wrong-2')).response.status, 401);
   assert.equal((await adminLogin(baseUrl, 'wrong-3')).response.status, 429);
   assert.equal((await fetch(`${baseUrl}/api/health`)).status, 200);
+});
+
+test('maintenance routes require a real session and backup creation also requires CSRF', async (context) => {
+  const fixture = await secureServer(context);
+  const anonymous = await fetch(`${fixture.baseUrl}/api/admin/maintenance/status`);
+  assert.equal(anonymous.status, 401);
+
+  const loginResult = await adminLogin(fixture.baseUrl);
+  assert.equal(loginResult.response.status, 200);
+  const sessionHeaders = { Cookie: loginResult.cookie, Origin: adminOrigin };
+  const status = await fetch(`${fixture.baseUrl}/api/admin/maintenance/status`, { headers: sessionHeaders });
+  assert.equal(status.status, 200);
+  const audit = await fetch(`${fixture.baseUrl}/api/admin/maintenance/audit`, { headers: sessionHeaders });
+  assert.equal(audit.status, 200);
+
+  const withoutCsrf = await fetch(`${fixture.baseUrl}/api/admin/maintenance/backups`, {
+    method: 'POST',
+    headers: { ...sessionHeaders, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(withoutCsrf.status, 403);
+
+  const created = await fetch(`${fixture.baseUrl}/api/admin/maintenance/backups`, {
+    method: 'POST',
+    headers: {
+      ...sessionHeaders,
+      'Content-Type': 'application/json',
+      'X-ExtinCheck-CSRF': loginResult.body.session!.csrfToken,
+    },
+    body: '{}',
+  });
+  const createdBody = await created.text();
+  assert.equal(created.status, 201, createdBody);
+});
+
+test('request ID accepts a safe client value and replaces unsafe input', async (context) => {
+  const fixture = await secureServer(context);
+  const safe = await fetch(`${fixture.baseUrl}/api/health`, {
+    headers: { 'X-Request-ID': 'mobile.sync-123' },
+  });
+  assert.equal(safe.headers.get('x-request-id'), 'mobile.sync-123');
+  const unsafe = await fetch(`${fixture.baseUrl}/api/health`, {
+    headers: { 'X-Request-ID': 'unsafe value with spaces' },
+  });
+  assert.notEqual(unsafe.headers.get('x-request-id'), 'unsafe value with spaces');
+  assert.match(unsafe.headers.get('x-request-id') ?? '', /^[0-9a-f-]{36}$/);
 });

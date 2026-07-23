@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { BranchInput, CompanyInput, EquipmentType, LocationInput } from './admin-validation.js';
+import { applyOrderedMigrations, configureSqlite, requireSupportedSchema } from './schema-version.js';
 
 type ActiveFilter = boolean | undefined;
 
@@ -10,10 +11,12 @@ export class AdminValidationError extends Error {}
 
 export class AdminRepository {
   private readonly database: DatabaseSync;
+  private closed = false;
 
   constructor(public readonly filePath: string) {
     this.database = new DatabaseSync(filePath);
-    this.database.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+    configureSqlite(this.database);
+    const initialSchemaVersion = requireSupportedSchema(this.database);
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY,
@@ -78,6 +81,11 @@ export class AdminRepository {
       CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
       ON admin_sessions(expires_at, revoked_at);
     `);
+    if (initialSchemaVersion === 0) {
+      applyOrderedMigrations(this.database, [
+        { version: 1, name: 'baseline-admin-schema', up: () => undefined },
+      ]);
+    }
     const locationTable = this.database.prepare(
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_locations'`
     ).get() as { sql: string } | undefined;
@@ -414,8 +422,16 @@ export class AdminRepository {
     `).run(now, now);
   }
 
+  revokeAllAdminSessions(revokedAt = new Date().toISOString()) {
+    this.database.prepare(
+      'UPDATE admin_sessions SET revoked_at = ? WHERE revoked_at IS NULL'
+    ).run(revokedAt);
+  }
+
   close() {
+    if (this.closed) return;
     this.database.close();
+    this.closed = true;
   }
 
   private getBranch(id: string): any | undefined {

@@ -10,14 +10,28 @@ import {
 import { FIRE_PUMP_CONFIG, FIRE_PUMP_MOBILE_IDS } from './fire-pump-config.js';
 import { ALARM_FORM_TYPES, ALARM_MOBILE_IDS } from './alarm-config.js';
 import { ANSUL_FORMAT_ID } from './ansul-config.js';
+import { applyOrderedMigrations, configureSqlite, requireSupportedSchema } from './schema-version.js';
+import { createStorageLayout, resolveStoredPath, StorageLayout, toPortableStoredPath } from './storage-paths.js';
 
 export class LocalDatabase {
   private readonly database: DatabaseSync;
+  private closed = false;
+  public readonly storage: StorageLayout;
 
-  constructor(public readonly filePath: string) {
+  constructor(public readonly filePath: string, storage?: StorageLayout) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    this.storage = storage ?? createStorageLayout({
+      root: path.resolve(path.dirname(filePath), '..'),
+      data: path.dirname(filePath),
+    });
     this.database = new DatabaseSync(filePath);
-    this.database.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
+    try {
+      configureSqlite(this.database);
+      requireSupportedSchema(this.database);
+    } catch (error) {
+      this.database.close();
+      throw error;
+    }
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS inspections (
         id TEXT PRIMARY KEY,
@@ -226,6 +240,18 @@ export class LocalDatabase {
 
       CREATE INDEX IF NOT EXISTS idx_generated_reports_generated_at
       ON generated_reports(generated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS storage_path_anomalies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        table_name TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        column_name TEXT NOT NULL,
+        stored_path TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE(table_name, row_id, column_name, stored_path)
+      );
     `);
     this.ensureColumn('inspections', 'branch_id', 'TEXT');
     this.ensureColumn('inspections', 'branch_name', 'TEXT');
@@ -279,6 +305,49 @@ export class LocalDatabase {
       UPDATE generated_reports SET format_type = 'inspection'
       WHERE format_type = 'extinguishers';
     `);
+    this.normalizeStoredPaths();
+    applyOrderedMigrations(this.database, [
+      { version: 1, name: 'baseline-local-schema', up: () => undefined },
+      { version: 2, name: 'portable-storage-paths', up: () => undefined },
+    ]);
+  }
+
+  private normalizeStoredPaths() {
+    const targets = [
+      ['generated_reports', 'file_path'],
+      ['inspection_signatures', 'file_path'],
+      ['inspection_evidence', 'file_path'],
+      ['inspection_evidence', 'thumbnail_path'],
+    ] as const;
+    for (const [table, column] of targets) {
+      const rows = this.database.prepare(
+        `SELECT id, ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> ''`
+      ).all() as Array<{ id: string; value: string }>;
+      for (const row of rows) {
+        try {
+          const portable = toPortableStoredPath(row.value, this.storage);
+          if (portable !== row.value) {
+            this.database.prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`).run(portable, row.id);
+          }
+        } catch (error) {
+          this.database.prepare(`INSERT OR IGNORE INTO storage_path_anomalies
+            (table_name, row_id, column_name, stored_path, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)`).run(
+              table, row.id, column, row.value,
+              error instanceof Error ? error.message : 'Ruta inválida',
+              new Date().toISOString()
+            );
+        }
+      }
+    }
+  }
+
+  portablePath(value: string) {
+    return toPortableStoredPath(value, this.storage);
+  }
+
+  resolvePath(value: string) {
+    return resolveStoredPath(value, this.storage);
   }
 
   private ensureColumn(table: string, column: string, definition: string) {
@@ -642,9 +711,10 @@ export class LocalDatabase {
     }
   }
   getInspectionSignature(inspectionId: string, signatureType = 'technician'): InspectionSignature | undefined {
-    return this.database.prepare(`SELECT id, inspection_id, signature_type, mime_type, file_path,
+    const signature = this.database.prepare(`SELECT id, inspection_id, signature_type, mime_type, file_path,
       signer_name, signed_at, created_at, updated_at FROM inspection_signatures
       WHERE inspection_id = ? AND signature_type = ?`).get(inspectionId, signatureType) as InspectionSignature | undefined;
+    return signature ? { ...signature, file_path: this.resolvePath(signature.file_path) } : undefined;
   }
   upsertInspectionSignature(input: {
     inspectionId: string; signatureType: string; mimeType: 'image/png'; filePath: string;
@@ -660,7 +730,7 @@ export class LocalDatabase {
     ON CONFLICT(inspection_id, signature_type) DO UPDATE SET
       mime_type=excluded.mime_type, file_path=excluded.file_path, signer_name=excluded.signer_name,
       signed_at=excluded.signed_at, updated_at=excluded.updated_at`).run(
-      id, input.inspectionId, input.signatureType, input.mimeType, input.filePath,
+      id, input.inspectionId, input.signatureType, input.mimeType, this.portablePath(input.filePath),
       input.signerName, input.signedAt, existing?.created_at ?? now, now
     );
     return this.getInspectionSignature(input.inspectionId, input.signatureType)!;
@@ -690,23 +760,34 @@ export class LocalDatabase {
     return false;
   }
   getEvidence(id: string): InspectionEvidence | undefined {
-    return this.database.prepare(`SELECT id, inspection_id, format_type, form_type, item_id, field_key, caption,
+    const evidence = this.database.prepare(`SELECT id, inspection_id, format_type, form_type, item_id, field_key, caption,
       location_name_snapshot, mime_type, filename, file_path, thumbnail_path, file_size,
       width, height, checksum, captured_at, created_at, updated_at
       FROM inspection_evidence WHERE id = ?`).get(id) as InspectionEvidence | undefined;
+    return evidence ? this.decorateEvidence(evidence) : undefined;
   }
   getEvidenceByChecksum(inspectionId: string, checksum: string): InspectionEvidence | undefined {
-    return this.database.prepare('SELECT * FROM inspection_evidence WHERE inspection_id = ? AND checksum = ?')
+    const evidence = this.database.prepare('SELECT * FROM inspection_evidence WHERE inspection_id = ? AND checksum = ?')
       .get(inspectionId, checksum) as InspectionEvidence | undefined;
+    return evidence ? this.decorateEvidence(evidence) : undefined;
   }
   listInspectionEvidence(inspectionId: string): InspectionEvidence[] {
-    return this.database.prepare(`SELECT * FROM inspection_evidence WHERE inspection_id = ?
+    const evidence = this.database.prepare(`SELECT * FROM inspection_evidence WHERE inspection_id = ?
       ORDER BY captured_at, id`).all(inspectionId) as unknown as InspectionEvidence[];
+    return evidence.map((item) => this.decorateEvidence(item));
   }
   listReportEvidence(reportId: string): InspectionEvidence[] {
-    return this.database.prepare(`SELECT e.* FROM inspection_evidence e
+    const evidence = this.database.prepare(`SELECT e.* FROM inspection_evidence e
       JOIN generated_reports r ON r.inspection_id = e.inspection_id
       WHERE r.id = ? ORDER BY e.captured_at, e.id`).all(reportId) as unknown as InspectionEvidence[];
+    return evidence.map((item) => this.decorateEvidence(item));
+  }
+  private decorateEvidence(evidence: InspectionEvidence): InspectionEvidence {
+    return {
+      ...evidence,
+      file_path: this.resolvePath(evidence.file_path),
+      thumbnail_path: evidence.thumbnail_path ? this.resolvePath(evidence.thumbnail_path) : null,
+    };
   }
   upsertEvidence(input: Omit<InspectionEvidence, 'created_at' | 'updated_at'>): InspectionEvidence {
     const now = new Date().toISOString();
@@ -725,7 +806,9 @@ export class LocalDatabase {
       captured_at=excluded.captured_at, updated_at=excluded.updated_at`).run(
       input.id, input.inspection_id, input.format_type, input.form_type, input.item_id, input.field_key,
       input.caption, input.location_name_snapshot, input.mime_type, input.filename,
-      input.file_path, input.thumbnail_path, input.file_size, input.width, input.height,
+      this.portablePath(input.file_path),
+      input.thumbnail_path ? this.portablePath(input.thumbnail_path) : null,
+      input.file_size, input.width, input.height,
       input.checksum, input.captured_at, existing?.created_at ?? now, now
     );
     return this.getEvidence(input.id)!;
@@ -1073,6 +1156,7 @@ export class LocalDatabase {
       },
       ansul,
       signature, evidence,
+      resolveStoredPath: (value: string) => this.resolvePath(value),
     };
   }
 
@@ -1108,7 +1192,7 @@ export class LocalDatabase {
       input.inspectionId,
       input.formatType,
       input.filename,
-      input.filePath,
+      input.filePath ? this.portablePath(input.filePath) : '',
       input.generatedAt,
       input.status,
       input.errorMessage,
@@ -1193,6 +1277,7 @@ export class LocalDatabase {
     }
     return {
       ...report,
+      file_path: report.file_path ? this.resolvePath(report.file_path) : '',
       formats: rawFormats.join(', ') || report.formats,
       signature_available: signature ? 1 : 0,
       signature_signer_name: signature?.signer_name ?? null,
@@ -1317,8 +1402,70 @@ export class LocalDatabase {
     };
   }
 
+  schemaVersion() {
+    return requireSupportedSchema(this.database);
+  }
+
+  integrity() {
+    const integrity = this.database.prepare('PRAGMA integrity_check').all() as Array<{ integrity_check: string }>;
+    const foreignKeys = this.database.prepare('PRAGMA foreign_key_check').all();
+    return {
+      ok: integrity.every((row) => row.integrity_check === 'ok') && foreignKeys.length === 0,
+      integrity,
+      foreignKeys,
+    };
+  }
+
+  checkpoint() {
+    this.database.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  }
+
+  backupTo(targetPath: string) {
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.rmSync(targetPath, { force: true });
+    this.database.exec(`VACUUM INTO '${targetPath.replaceAll("'", "''")}'`);
+  }
+
+  tableCounts(): Record<string, number> {
+    const tables = this.database.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`
+    ).all() as Array<{ name: string }>;
+    return Object.fromEntries(tables.map(({ name }) => {
+      const escaped = name.replaceAll('"', '""');
+      const row = this.database.prepare(`SELECT COUNT(*) AS count FROM "${escaped}"`).get() as { count: number };
+      return [name, row.count];
+    }));
+  }
+
+  storagePathRows() {
+    return [
+      ...this.database.prepare(`SELECT 'generated_reports' AS table_name, id, 'file_path' AS column_name,
+        file_path AS stored_path, NULL AS checksum FROM generated_reports`).all(),
+      ...this.database.prepare(`SELECT 'inspection_signatures' AS table_name, id, 'file_path' AS column_name,
+        file_path AS stored_path, NULL AS checksum FROM inspection_signatures`).all(),
+      ...this.database.prepare(`SELECT 'inspection_evidence' AS table_name, id, 'file_path' AS column_name,
+        file_path AS stored_path, checksum FROM inspection_evidence`).all(),
+      ...this.database.prepare(`SELECT 'inspection_evidence' AS table_name, id, 'thumbnail_path' AS column_name,
+        thumbnail_path AS stored_path, NULL AS checksum FROM inspection_evidence
+        WHERE thumbnail_path IS NOT NULL AND thumbnail_path <> ''`).all(),
+    ] as Array<{
+      table_name: string;
+      id: string;
+      column_name: string;
+      stored_path: string;
+      checksum: string | null;
+    }>;
+  }
+
+  storedPathAnomalies() {
+    return this.database.prepare(`SELECT table_name, row_id, column_name, stored_path, reason, created_at
+      FROM storage_path_anomalies WHERE resolved_at IS NULL ORDER BY created_at`).all();
+  }
+
   close() {
+    if (this.closed) return;
     this.database.close();
+    this.closed = true;
   }
 }
 
@@ -1401,6 +1548,7 @@ export interface InspectionEvidence {
 }
 
 export interface InspectionReportData {
+  resolveStoredPath: (value: string) => string;
   inspection: {
     id: string;
     companyId: string | null;

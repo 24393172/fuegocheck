@@ -18,7 +18,15 @@
     "seed": "tsx src/seed.ts",
     "admin:hash-password": "tsx src/security-tools.ts hash-password",
     "security:generate-secret": "tsx src/security-tools.ts generate-secret",
-    "security:generate-api-key": "tsx src/security-tools.ts generate-api-key"
+    "security:generate-api-key": "tsx src/security-tools.ts generate-api-key",
+    "backup": "tsx src/operations-cli.ts backup",
+    "backup:verify": "tsx src/operations-cli.ts backup:verify",
+    "restore": "tsx src/operations-cli.ts restore",
+    "storage:report": "tsx src/operations-cli.ts storage:report",
+    "storage:audit": "tsx src/operations-cli.ts storage:audit",
+    "storage:cleanup": "tsx src/operations-cli.ts storage:cleanup",
+    "logs:report": "tsx src/operations-cli.ts logs:report",
+    "logs:cleanup": "tsx src/operations-cli.ts logs:cleanup"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

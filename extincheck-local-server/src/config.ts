@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
+import { createStorageLayout, StorageLayout, validateStorageLayout } from './storage-paths.js';
 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const productionModes = new Set(['production', 'local-production']);
@@ -40,6 +41,18 @@ export interface ServerConfig {
   generatedReportsPath: string;
   adminWebPath: string;
   security: SecurityConfig;
+  operational: OperationalConfig;
+}
+
+export interface OperationalConfig {
+  storage: StorageLayout;
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+  logRetentionDays: number;
+  backupRetentionDays: number;
+  minFreeDiskMb: number;
+  tempFileMaxAgeHours: number;
+  windowsAutostartMode: 'task-scheduler' | 'pm2' | 'none';
+  expectedTemplateSha256?: string;
 }
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -74,15 +87,29 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Server
     }
   }
 
+  const databasePath = resolveProjectPath(environment.DATABASE_PATH, './data/extincheck-local.sqlite');
+  const templatePath = resolveProjectPath(
+    environment.EXTINGUISHERS_TEMPLATE_PATH,
+    './templates/FORMATOS P.R. CANCUN.xlsx'
+  );
+  const generatedReportsPath = resolveProjectPath(environment.GENERATED_REPORTS_PATH, './generated-reports');
+  const storage = createStorageLayout({
+    root: projectRoot,
+    data: path.dirname(databasePath),
+    reports: generatedReportsPath,
+    templates: path.dirname(templatePath),
+    backups: resolveProjectPath(environment.BACKUP_DIRECTORY, './backups'),
+    logs: resolveProjectPath(environment.LOG_DIRECTORY, './logs'),
+    temp: resolveProjectPath(environment.TEMP_DIRECTORY, './temp'),
+  });
+  validateStorageLayout(storage);
+
   return {
     host: environment.HOST?.trim() || '0.0.0.0',
     port: parseInteger(environment.PORT, 3001, 1, 65535, 'PORT'),
-    databasePath: resolveProjectPath(environment.DATABASE_PATH, './data/extincheck-local.sqlite'),
-    templatePath: resolveProjectPath(
-      environment.EXTINGUISHERS_TEMPLATE_PATH,
-      './templates/FORMATOS P.R. CANCUN.xlsx'
-    ),
-    generatedReportsPath: resolveProjectPath(environment.GENERATED_REPORTS_PATH, './generated-reports'),
+    databasePath,
+    templatePath,
+    generatedReportsPath,
     adminWebPath: resolveProjectPath(environment.ADMIN_WEB_PATH, './admin-web/dist'),
     security: {
       nodeEnv,
@@ -103,7 +130,31 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Server
         admin: rateLimit(environment, 'ADMIN_RATE_LIMIT', 60_000, 600),
       },
     },
+    operational: {
+      storage,
+      logLevel: parseEnum(environment.LOG_LEVEL, ['debug', 'info', 'warn', 'error'], 'info', 'LOG_LEVEL'),
+      logRetentionDays: parseInteger(environment.LOG_RETENTION_DAYS, 30, 1, 3650, 'LOG_RETENTION_DAYS'),
+      backupRetentionDays: parseInteger(environment.BACKUP_RETENTION_DAYS, 30, 1, 3650, 'BACKUP_RETENTION_DAYS'),
+      minFreeDiskMb: parseInteger(environment.MIN_FREE_DISK_MB, 512, 1, 1_000_000, 'MIN_FREE_DISK_MB'),
+      tempFileMaxAgeHours: parseInteger(environment.TEMP_FILE_MAX_AGE_HOURS, 24, 1, 8760, 'TEMP_FILE_MAX_AGE_HOURS'),
+      windowsAutostartMode: parseEnum(
+        environment.WINDOWS_AUTOSTART_MODE,
+        ['task-scheduler', 'pm2', 'none'],
+        'task-scheduler',
+        'WINDOWS_AUTOSTART_MODE'
+      ),
+      expectedTemplateSha256: parseOptionalSha256(environment.EXPECTED_TEMPLATE_SHA256),
+    },
   };
+}
+
+function parseOptionalSha256(value: string | undefined) {
+  const normalized = value?.trim();
+  if (!normalized) return undefined;
+  if (!/^[a-f0-9]{64}$/i.test(normalized)) {
+    throw configurationError('EXPECTED_TEMPLATE_SHA256 debe ser un SHA-256 hexadecimal.');
+  }
+  return normalized.toLowerCase();
 }
 
 export function createTestSecurityConfig(
@@ -173,6 +224,19 @@ function parseNumber(
     throw configurationError(`${name} debe estar entre ${minimum} y ${maximum}.`);
   }
   return parsed;
+}
+
+function parseEnum<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+  name: string
+): T {
+  const normalized = (value?.trim() || fallback) as T;
+  if (!allowed.includes(normalized)) {
+    throw configurationError(`${name} debe ser uno de: ${allowed.join(', ')}.`);
+  }
+  return normalized;
 }
 
 function parseOrigins(value: string | undefined) {

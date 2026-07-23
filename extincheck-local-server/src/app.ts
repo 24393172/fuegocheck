@@ -13,10 +13,11 @@ import { LocalDatabase } from './database.js';
 import { ExtinguisherReportService } from './report-generator.js';
 import { CorsOriginError, corsOriginAllowed, createSecurity } from './security.js';
 import { evidenceFinalizeSchema, evidenceMetadataSchema, extinguisherInspectionSchema, hydrantInspectionSchema, inspectionSyncSchema } from './validation.js';
+import { OperationalService } from './operations.js';
+import { requestLogging } from './logger.js';
+import { SERVER_VERSION } from './version.js';
 
 let syncQueue: Promise<void> = Promise.resolve();
-const SERVER_VERSION = '0.1.0';
-
 function serializeSync<T>(operation: () => Promise<T>): Promise<T> {
   const result = syncQueue.then(operation, operation);
   syncQueue = result.then(() => undefined, () => undefined);
@@ -52,9 +53,16 @@ export function createApp(
   reportService: ExtinguisherReportService,
   adminRepository: AdminRepository,
   adminWebPath: string,
-  securityConfig: SecurityConfig
+  securityConfig: SecurityConfig,
+  operations?: OperationalService
 ) {
   const app = express();
+  const runWrite = <T>(operation: () => Promise<T>) =>
+    operations ? operations.coordinator.runWrite(operation) : serializeSync(operation);
+  const ensureReportSpace = () => operations?.ensureFreeSpace(
+    reportService.reportsDirectory,
+    fs.existsSync(reportService.templatePath) ? fs.statSync(reportService.templatePath).size * 2 : 0
+  );
   const security = createSecurity(adminRepository, securityConfig);
   const signaturesDirectory = path.join(path.dirname(database.filePath), 'signatures');
   const evidenceDirectory = path.join(path.dirname(database.filePath), 'evidence');
@@ -100,6 +108,24 @@ export function createApp(
   // The request also contains inspection data, so transport overhead must be
   // larger than the validated 1 MiB decoded PNG signature limit.
   app.use(express.json({ limit: '2mb', strict: true }));
+  if (operations) app.use(requestLogging(operations.logger));
+  if (operations) {
+    app.use((request, response, next) => {
+      const legacyInspectionWrite = request.path === '/api/inspections/extinguishers'
+        || request.path === '/api/inspections/hydrants';
+      const evidenceWrite = request.path.includes('/evidence') && !request.path.endsWith('/finalize');
+      if ((!legacyInspectionWrite && !evidenceWrite)
+          || ['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
+        next();
+        return;
+      }
+      void operations.coordinator.runWrite(() => new Promise<void>((resolve, reject) => {
+        response.once('finish', resolve);
+        response.once('close', resolve);
+        try { next(); } catch (error) { reject(error); }
+      })).catch(next);
+    });
+  }
 
   app.get('/api/health', (_request, response) => {
     response.json({
@@ -118,6 +144,7 @@ export function createApp(
     security.requireAdminSession,
     (_request, response) => {
       const summary = database.summary();
+      const operational = operations?.status();
       response.json({
         ok: true,
         service: 'ExtinCheck Local Server',
@@ -125,11 +152,14 @@ export function createApp(
         environment: securityConfig.nodeEnv,
         uptimeSeconds: Math.floor(process.uptime()),
         database: {
+          schemaVersion: database.schemaVersion(),
+          integrity: database.integrity().ok,
           inspections: countFromSummary(summary.inspections),
           extinguishers: countFromSummary(summary.extinguishers),
           hydrants: countFromSummary(summary.hydrants),
           reports: summary.reports.length,
         },
+        operational: operational ?? null,
         timestamp: new Date().toISOString(),
       });
     }
@@ -141,9 +171,64 @@ export function createApp(
       adminRepository,
       security.requireAdminSession,
       security.requireAdminCsrf,
-      security.adminRateLimit
+      security.adminRateLimit,
+      operations?.coordinator
     )
   );
+
+  if (operations) {
+    app.get(
+      '/api/admin/maintenance/status',
+      security.adminRateLimit,
+      security.requireAdminSession,
+      (_request, response) => response.json({ ok: true, status: operations.status() })
+    );
+    app.get(
+      '/api/admin/maintenance/backups',
+      security.adminRateLimit,
+      security.requireAdminSession,
+      (_request, response) => response.json({ ok: true, backups: operations.listBackups() })
+    );
+    app.get(
+      '/api/admin/maintenance/audit',
+      security.adminRateLimit,
+      security.requireAdminSession,
+      (_request, response) => response.json({ ok: true, audit: operations.storageAudit() })
+    );
+    app.get(
+      '/api/admin/maintenance/backups/:id/manifest',
+      security.adminRateLimit,
+      security.requireAdminSession,
+      (request, response) => {
+        try {
+          response
+            .attachment(`manifest-${routeParam(request.params.id)}.json`)
+            .json(operations.manifest(routeParam(request.params.id)));
+        } catch {
+          response.status(404).json({ ok: false, message: 'Respaldo no encontrado.' });
+        }
+      }
+    );
+    app.post(
+      '/api/admin/maintenance/backups',
+      security.adminRateLimit,
+      security.requireAdminSession,
+      security.requireAdminCsrf,
+      async (request, response) => {
+        try {
+          const backup = await operations.createBackup({
+            label: typeof request.body?.label === 'string' ? request.body.label : undefined,
+          });
+          response.status(201).json({ ok: true, backup });
+        } catch (error) {
+          response.status(409).json({
+            ok: false,
+            message: error instanceof Error ? error.message : 'No se pudo crear el respaldo.',
+          });
+        }
+      }
+    );
+  }
 
   app.get('/api/mobile/catalog', security.requireMobileToken, (_request, response) => {
     response.json(adminRepository.mobileCatalog());
@@ -159,6 +244,7 @@ export function createApp(
       const result = database.upsertInspection(payload);
       database.addSelectedFormatId(payload.inspectionId, 'extintores');
       try {
+        ensureReportSpace();
         const report = await reportService.generate(payload.inspectionId);
         response.status(result.created ? 201 : 200).json({
           ok: true,
@@ -203,6 +289,7 @@ export function createApp(
       const result = database.upsertHydrantInspection(payload);
       database.addSelectedFormatId(payload.inspectionId, 'hidrantes');
       try {
+        ensureReportSpace();
         const report = await reportService.generate(payload.inspectionId);
         response.status(result.created ? 201 : 200).json({
           ok: true,
@@ -258,7 +345,7 @@ export function createApp(
     }
 
     try {
-      const result = await serializeSync(async () => {
+      const result = await runWrite(async () => {
         const supported: string[] = payload.selectedFormatIds.filter(
           (id) => id === 'extintores' || id === 'hidrantes'
         );
@@ -274,6 +361,10 @@ export function createApp(
         let transactionStarted = false;
         try {
           if (payload.signature && stagedSignaturePath) {
+            operations?.ensureFreeSpace(
+              signaturesDirectory,
+              Buffer.byteLength(payload.signature.dataBase64, 'base64')
+            );
             fs.writeFileSync(stagedSignaturePath, Buffer.from(payload.signature.dataBase64, 'base64'), { flag: 'wx' });
           }
           database.beginSync();
@@ -298,14 +389,19 @@ export function createApp(
               database.deleteInspectionSignature(payload.inspectionId);
             }
           }
+          if (supported.length && payload.evidenceManifest === undefined) {
+            ensureReportSpace();
+          }
           const report = supported.length && payload.evidenceManifest === undefined
             ? await reportService.generate(payload.inspectionId, { recordFailure: false }) : null;
           database.commitSync();
           transactionStarted = false;
-          if (payload.signature !== undefined && previousSignature?.file_path
-              && previousSignature.file_path !== newSignaturePath
-              && isInsideDirectory(previousSignature.file_path, signaturesDirectory)) {
-            try { fs.rmSync(previousSignature.file_path, { force: true }); }
+          const previousSignaturePath = previousSignature?.file_path
+            ? database.resolvePath(previousSignature.file_path) : null;
+          if (payload.signature !== undefined && previousSignaturePath
+              && previousSignaturePath !== newSignaturePath
+              && isInsideDirectory(previousSignaturePath, signaturesDirectory)) {
+            try { fs.rmSync(previousSignaturePath, { force: true }); }
             catch (cleanupError) {
               logInternalError(securityConfig, 'Previous signature cleanup failed', cleanupError);
             }
@@ -447,6 +543,10 @@ export function createApp(
       }
       const inspectionFolder = createHash('sha256').update(inspectionId).digest('hex').slice(0, 32);
       const directory = path.join(evidenceDirectory, inspectionFolder);
+      operations?.ensureFreeSpace(
+        directory,
+        original.buffer.length + (thumbnail?.buffer.length ?? 0)
+      );
       fs.mkdirSync(directory, { recursive: true });
       const extension = image.mimeType === 'image/png' ? 'png' : 'jpg';
       const newFilePath = path.join(directory, `${randomUUID()}.${extension}`);
@@ -470,7 +570,8 @@ export function createApp(
           width: image.width, height: image.height, checksum, captured_at: metadata.capturedAt,
         });
         database.commitSync(); transactionStarted = false;
-        for (const oldPath of [existing?.file_path, existing?.thumbnail_path]) {
+        for (const storedPath of [existing?.file_path, existing?.thumbnail_path]) {
+          const oldPath = storedPath ? database.resolvePath(storedPath) : null;
           if (oldPath && oldPath !== newFilePath && oldPath !== newThumbnailPath && isInsideDirectory(oldPath, evidenceDirectory)) {
             fs.rmSync(oldPath, { force: true });
           }
@@ -511,7 +612,8 @@ export function createApp(
     database.beginSync();
     try { database.deleteEvidence(inspectionId, evidenceId); database.commitSync(); }
     catch (error) { database.rollbackSync(); throw error; }
-    for (const candidate of [evidence.file_path, evidence.thumbnail_path]) {
+    for (const storedPath of [evidence.file_path, evidence.thumbnail_path]) {
+      const candidate = storedPath ? database.resolvePath(storedPath) : null;
       if (candidate && isInsideDirectory(candidate, evidenceDirectory)) fs.rmSync(candidate, { force: true });
     }
     response.json({ ok: true, deleted: true });
@@ -531,7 +633,8 @@ export function createApp(
       if (JSON.stringify(actual) !== JSON.stringify(expected)) {
         response.status(409).json({ ok: false, message: 'Evidence synchronization is incomplete', expected: expected.length, received: actual.length }); return;
       }
-      const report = await serializeSync(() => reportService.generate(inspectionId));
+      ensureReportSpace();
+      const report = await runWrite(() => reportService.generate(inspectionId));
       response.json({ ok: true, evidenceCount: actual.length, report: {
         id: report.id, filename: report.filename,
         downloadUrl: mobileReportUrl(inspectionId, report.id),
@@ -579,10 +682,11 @@ export function createApp(
     security.requireAdminSession,
     (request, response) => {
     const evidence = database.getEvidence(routeParam(request.params.id));
-    if (!evidence || !isInsideDirectory(evidence.file_path, evidenceDirectory) || !fs.existsSync(evidence.file_path)) {
+    const target = evidence ? database.resolvePath(evidence.file_path) : null;
+    if (!evidence || !target || !isInsideDirectory(target, evidenceDirectory) || !fs.existsSync(target)) {
       response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
     }
-    response.type(evidence.mime_type).sendFile(path.resolve(evidence.file_path));
+    response.type(evidence.mime_type).sendFile(target);
     }
   );
 
@@ -592,11 +696,12 @@ export function createApp(
     security.requireAdminSession,
     (request, response) => {
     const evidence = database.getEvidence(routeParam(request.params.id));
-    const target = evidence?.thumbnail_path || evidence?.file_path;
+    const storedTarget = evidence?.thumbnail_path || evidence?.file_path;
+    const target = storedTarget ? database.resolvePath(storedTarget) : null;
     if (!evidence || !target || !isInsideDirectory(target, evidenceDirectory) || !fs.existsSync(target)) {
       response.status(404).json({ ok: false, message: 'Evidence not found' }); return;
     }
-    response.type(evidence.mime_type).sendFile(path.resolve(target));
+    response.type(evidence.mime_type).sendFile(target);
     }
   );
 

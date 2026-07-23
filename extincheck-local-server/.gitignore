@@ -14,3 +14,8 @@ pilots/
 templates/backups/
 templates/*.normalizado.xlsx
 templates/*.ansul-corregido.xlsx
+backups/
+logs/
+temp/
+*.restore-rollback
+*.pending
