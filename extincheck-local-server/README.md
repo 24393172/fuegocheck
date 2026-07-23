@@ -221,7 +221,34 @@ npm run build
 npm test
 ```
 
-La suite conserva las 29 pruebas funcionales anteriores y añade cobertura para
+La suite conserva todas las pruebas funcionales anteriores y añade cobertura para
 configuración, login, cookie HTTP-only, persistencia, expiración, logout, CSRF,
 CORS, rate limit, catálogo/sincronización/evidencias móviles y descarga XLSX con
 Bearer.
+
+## Operación, respaldos y recuperación
+
+La sección **Mantenimiento** del panel muestra el estado de SQLite, espacio
+disponible, anomalías y respaldos terminados. Crear un respaldo desde el panel
+requiere sesión, origen autorizado y CSRF. La restauración no está expuesta en
+la interfaz web.
+
+Variables operativas: `BACKUP_DIRECTORY`, `LOG_DIRECTORY`, `LOG_LEVEL`,
+`LOG_RETENTION_DAYS`, `BACKUP_RETENTION_DAYS`, `MIN_FREE_DISK_MB`,
+`TEMP_FILE_MAX_AGE_HOURS`, `TEMP_DIRECTORY` y `WINDOWS_AUTOSTART_MODE`.
+
+```powershell
+npm run backup
+npm run backup:verify -- --backup C:\ruta\al\respaldo
+npm run restore -- --backup C:\ruta\al\respaldo
+npm run storage:report
+npm run storage:audit
+npm run storage:cleanup
+npm run logs:report
+npm run logs:cleanup
+```
+
+`restore` es una simulación por defecto. La aplicación real exige `--apply`,
+`--confirm <ID>` y que el servidor esté detenido. Consulta
+[`docs/RECUPERACION.md`](../docs/RECUPERACION.md) para restauración, respaldo
+externo, inicio automático, firewall e IP local.

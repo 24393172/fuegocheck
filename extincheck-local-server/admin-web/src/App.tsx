@@ -12,7 +12,7 @@ import {
 } from './api';
 import { Branch, Company, EquipmentType, Evidence, Location, Report } from './types';
 
-type View = 'companies' | 'locations' | 'reports';
+type View = 'companies' | 'locations' | 'reports' | 'maintenance';
 type Notice = { kind: 'success' | 'error'; text: string } | null;
 
 export function App() {
@@ -105,6 +105,7 @@ function AdminPanel({ session, onSignedOut }: { session: AdminSession; onSignedO
           <NavButton active={view === 'companies'} onClick={() => setView('companies')} label="Empresas" icon="▦" />
           <NavButton active={view === 'locations'} onClick={() => setView('locations')} label="Ubicaciones" icon="⌖" />
           <NavButton active={view === 'reports'} onClick={() => setView('reports')} label="Reportes" icon="▤" />
+          <NavButton active={view === 'maintenance'} onClick={() => setView('maintenance')} label="Mantenimiento" icon="⚙" />
         </nav>
         <div className="server-badge"><span /> Servidor local</div>
       </aside>
@@ -114,6 +115,7 @@ function AdminPanel({ session, onSignedOut }: { session: AdminSession; onSignedO
         {view === 'companies' && <CompaniesView notify={notify} />}
         {view === 'locations' && <LocationsView notify={notify} />}
         {view === 'reports' && <ReportsView notify={notify} />}
+        {view === 'maintenance' && <MaintenanceView notify={notify} />}
       </main>
     </div>
   );
@@ -121,6 +123,75 @@ function AdminPanel({ session, onSignedOut }: { session: AdminSession; onSignedO
 
 function NavButton({ active, onClick, label, icon }: { active: boolean; onClick: () => void; label: string; icon: string }) {
   return <button className={active ? 'nav-item active' : 'nav-item'} onClick={onClick}><span>{icon}</span>{label}</button>;
+}
+
+type MaintenanceStatus = {
+  schemaVersion: number;
+  backupRunning: boolean;
+  maintenance: { state: string; queued: number };
+  disk: { freeMb: number; minimumMb: number; ok: boolean };
+  externalBackupRecommended: boolean;
+  storageAnomalies: number;
+  lastBackupOperation: { status: 'completed' | 'failed'; at: string; message?: string } | null;
+  network: {
+    addresses: Array<{ name: string; address: string }>;
+    primaryAddress: string | null;
+    multipleInterfaces: boolean;
+  };
+};
+
+function MaintenanceView({ notify }: { notify: Notify }) {
+  const [status, setStatus] = useState<MaintenanceStatus | null>(null);
+  const [backups, setBackups] = useState<Array<{ id: string; createdAt: string; files: number }>>([]);
+  const [creating, setCreating] = useState(false);
+  const [audit, setAudit] = useState<{ errors: unknown[]; warnings: unknown[]; correct: unknown[] } | null>(null);
+  const [observedIp] = useState(() => window.localStorage.getItem('extincheck-observed-local-ip'));
+  const load = useCallback(async () => {
+    try {
+      const [statusResult, backupsResult] = await Promise.all([
+        api<{ status: MaintenanceStatus }>('/api/admin/maintenance/status'),
+        api<{ backups: Array<{ id: string; createdAt: string; files: number }> }>('/api/admin/maintenance/backups'),
+      ]);
+      setStatus(statusResult.status);
+      setBackups(backupsResult.backups);
+    } catch (error) { notify('error', message(error)); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (status?.network.primaryAddress) {
+      window.localStorage.setItem('extincheck-observed-local-ip', status.network.primaryAddress);
+    }
+  }, [status?.network.primaryAddress]);
+  const create = async () => {
+    setCreating(true);
+    try {
+      await api('/api/admin/maintenance/backups', { method: 'POST', body: '{}' });
+      notify('success', 'Respaldo verificado creado correctamente.');
+      await load();
+    } catch (error) { notify('error', message(error)); }
+    finally { setCreating(false); }
+  };
+  const runAudit = async () => {
+    try {
+      const result = await api<{ audit: { errors: unknown[]; warnings: unknown[]; correct: unknown[] } }>('/api/admin/maintenance/audit');
+      setAudit(result.audit);
+      notify('success', 'Auditoría de solo lectura terminada.');
+    } catch (error) { notify('error', message(error)); }
+  };
+  return <section>
+    <div className="section-heading"><div><h2>Estado operativo</h2><p>Respaldos, almacenamiento e integridad del servidor local.</p></div><div className="actions"><button onClick={() => void load()}>Actualizar diagnóstico</button><button onClick={() => void runAudit()}>Auditoría de solo lectura</button><button className="primary" disabled={creating || status?.backupRunning} onClick={() => void create()}>{creating ? 'Creando respaldo…' : 'Crear respaldo ahora'}</button></div></div>
+    <div className="maintenance-grid">
+      <article className="card maintenance-card"><span>SQLite</span><strong>Esquema {status?.schemaVersion ?? '—'}</strong><small>Estado: {status?.maintenance.state ?? 'consultando'}</small></article>
+      <article className="card maintenance-card"><span>Espacio libre</span><strong>{status ? `${status.disk.freeMb.toLocaleString()} MB` : '—'}</strong><small>Mínimo: {status?.disk.minimumMb ?? '—'} MB</small></article>
+      <article className="card maintenance-card"><span>Anomalías</span><strong>{status?.storageAnomalies ?? '—'}</strong><small>Elementos por revisar</small></article>
+      <article className="card maintenance-card"><span>Red local</span><strong>{status?.network.primaryAddress ?? 'No detectada'}</strong><small>{status?.network.multipleInterfaces ? 'Hay varias interfaces; verifica la IP del teléfono.' : `Puerto ${window.location.port || '80'}`}</small><small>Panel: {window.location.origin}/admin · <a href="/api/health" target="_blank" rel="noreferrer">Health</a></small></article>
+    </div>
+    {status?.externalBackupRecommended && <p className="backup-warning">Los respaldos están en el mismo volumen. Copia periódicamente uno verificado a una unidad externa.</p>}
+    {observedIp && status?.network.primaryAddress && observedIp !== status.network.primaryAddress && <p className="backup-warning">La IP local cambió de {observedIp} a {status.network.primaryAddress}. Verifica manualmente la URL configurada en Expo.</p>}
+    {status?.lastBackupOperation?.status === 'failed' && <p className="form-error">Último respaldo fallido: {status.lastBackupOperation.message || 'Error no especificado'}.</p>}
+    {audit && <div className="card audit-summary"><strong>Auditoría</strong><span>{audit.errors.length} errores</span><span>{audit.warnings.length} advertencias</span><span>{audit.correct.length} comprobaciones correctas</span></div>}
+    <div className="card table-card"><div className="block"><h3>Respaldos disponibles</h3><p className="muted">Para restaurar, detén el servidor y usa <code>npm run restore -- --backup &lt;ruta&gt;</code>. No existe restauración desde el panel.</p></div><div className="table-wrap"><table><thead><tr><th>ID</th><th>Creado</th><th>Archivos</th><th>Manifiesto</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><strong>{backup.id}</strong></td><td>{displayDateTime(backup.createdAt)}</td><td>{backup.files}</td><td><a className="download-button" href={`/api/admin/maintenance/backups/${encodeURIComponent(backup.id)}/manifest`}>Descargar</a></td></tr>)}</tbody></table>{!backups.length && <Empty text="Todavía no hay respaldos terminados." />}</div></div>
+  </section>;
 }
 
 function CompaniesView({ notify }: { notify: Notify }) {
@@ -293,7 +364,7 @@ function SimpleEditor({ title, firstLabel, secondLabel, initial, onClose, onSave
 
 type Notify = (kind: 'success' | 'error', text: string) => void;
 function message(error: unknown) { return error instanceof Error ? error.message : 'Ocurrió un error inesperado.'; }
-function viewTitle(view: View) { return ({ companies: 'Empresas', locations: 'Ubicaciones', reports: 'Reportes' } as const)[view]; }
+function viewTitle(view: View) { return ({ companies: 'Empresas', locations: 'Ubicaciones', reports: 'Reportes', maintenance: 'Mantenimiento' } as const)[view]; }
 function displayDate(value: string) { const [year, month, day] = value.split('-'); return year && month && day ? `${day}/${month}/${year}` : value; }
 function displayDateTime(value: string) { return new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); }
 function equipmentLabel(type: EquipmentType) {
