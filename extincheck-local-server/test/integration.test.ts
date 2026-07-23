@@ -11,6 +11,7 @@ import { AdminRepository } from '../src/admin-repository.js';
 import { createApp } from '../src/app.js';
 import { LocalDatabase } from '../src/database.js';
 import { ExtinguisherReportService, SHEET_CLEANUP_CONFIG } from '../src/report-generator.js';
+import { FIRE_PUMP_CONFIG, FIRE_PUMP_FORM_TYPES, PumpFormType } from '../src/fire-pump-config.js';
 
 const serverRoot = fileURLToPath(new URL('../', import.meta.url));
 const templatePath = path.join(serverRoot, 'templates', 'FORMATOS P.R. CANCUN.xlsx');
@@ -115,6 +116,52 @@ function hydrantPayload(inspectionId = 'inspection-hydrants-001', count = 3) {
     technician: { id: null, name: 'Daniel Cocom' },
     hydrants: Array.from({ length: count }, (_, index) => hydrant(`hyd-${index + 1}`, String(index + 1))),
     syncVersion: 200,
+  };
+}
+
+function completeFirePumpForm(formType: PumpFormType) {
+  const config = FIRE_PUMP_CONFIG[formType];
+  const answers = Object.keys(config.questions).map((questionId, index) => ({
+    questionId,
+    answer: (index % 3 === 0 ? 'si' : index % 3 === 1 ? 'na' : 'no') as 'si' | 'na' | 'no',
+    parameter: config.questions[questionId].fixedParameter,
+    comment: index === 0 ? `Comentario ${config.mobileId}` : '',
+  }));
+  for (const questionId of Object.keys(config.readingCells)) {
+    answers.push({
+      questionId,
+      answer: undefined as never,
+      parameter: undefined,
+      comment: '',
+      reading: questionId === 'capacidad'
+        ? '500 GPM'
+        : questionId === 'voltaje'
+          ? '220 V'
+          : questionId.includes('banco') ? '13.5' : '145',
+    } as typeof answers[number] & { reading: string });
+  }
+  return {
+    formType,
+    status: 'complete' as const,
+    observations: `Observaciones ${config.mobileId}`,
+    updatedAt: 1_785_000_000_000,
+    answers,
+  };
+}
+
+function firePumpsPayload(inspectionId = 'inspection-fire-pumps-001') {
+  return {
+    inspectionId,
+    company: { id: 'company-pumps', name: 'Hotel Bombas' },
+    branch: { id: 'branch-pumps', name: 'Cuarto principal' },
+    attention: 'Mantenimiento',
+    area: 'Cuarto de bombas',
+    date: '2026-07-23',
+    technician: { id: null, name: 'Daniel Cocom' },
+    syncVersion: 300,
+    selectedFormatIds: ['jockey', 'electrica', 'diesel'],
+    firePumps: FIRE_PUMP_FORM_TYPES.map(completeFirePumpForm),
+    signature: technicianSignature(),
   };
 }
 
@@ -512,7 +559,7 @@ test('atomic sync stores selected formats, reports partial support and is idempo
   const { database, baseUrl } = await testServer(context);
   const body = {
     ...payload('inspection-atomic-001'),
-    selectedFormatIds: ['extintores', 'jockey'],
+    selectedFormatIds: ['extintores', 'tablero_ad'],
   };
   const first = await fetch(`${baseUrl}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -522,7 +569,7 @@ test('atomic sync stores selected formats, reports partial support and is idempo
     syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: { id: string };
   };
   assert.deepEqual(firstBody.syncedFormatIds, ['extintores']);
-  assert.deepEqual(firstBody.unsupportedFormatIds, ['jockey']);
+  assert.deepEqual(firstBody.unsupportedFormatIds, ['tablero_ad']);
   assert.equal(firstBody.syncStatus, 'partial');
   assert.ok(firstBody.report.id);
 
@@ -534,11 +581,11 @@ test('atomic sync stores selected formats, reports partial support and is idempo
   assert.equal(database.extinguisherCount(body.inspectionId), 3);
   assert.equal(database.reportCount(body.inspectionId), 1);
   assert.deepEqual(database.getInspectionReportData(body.inspectionId)?.inspection.selectedFormatIds,
-    ['extintores', 'jockey']);
+    ['extintores', 'tablero_ad']);
 
   const unsupportedOnly = {
     inspectionId: 'inspection-unsupported-only', company: body.company, date: body.date,
-    technician: body.technician, syncVersion: 1, selectedFormatIds: ['jockey'],
+    technician: body.technician, syncVersion: 1, selectedFormatIds: ['tablero_ad'],
   };
   const unsupportedResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(unsupportedOnly),
@@ -548,7 +595,7 @@ test('atomic sync stores selected formats, reports partial support and is idempo
     syncedFormatIds: string[]; unsupportedFormatIds: string[]; syncStatus: string; report: null;
   };
   assert.deepEqual(unsupportedBody.syncedFormatIds, []);
-  assert.deepEqual(unsupportedBody.unsupportedFormatIds, ['jockey']);
+  assert.deepEqual(unsupportedBody.unsupportedFormatIds, ['tablero_ad']);
   assert.equal(unsupportedBody.syncStatus, 'partial');
   assert.equal(unsupportedBody.report, null);
   assert.equal(database.inspectionCount(unsupportedOnly.inspectionId), 1);
@@ -561,6 +608,168 @@ test('atomic sync stores selected formats, reports partial support and is idempo
   assert.equal(extOnlyResponse.status, 201);
   assert.equal(extOnlyBody.syncStatus, 'synced');
   assert.deepEqual(extOnlyBody.syncedFormatIds, ['extintores']);
+});
+
+test('Bombas synchronizes atomically, is idempotent and fills the three official sheets', async (context) => {
+  const { database, reportService, baseUrl } = await testServer(context);
+  const templateHashBefore = fileHash(templatePath);
+  const body = firePumpsPayload();
+
+  const first = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(first.status, 201);
+  const firstBody = await first.json() as {
+    syncedFormatIds: string[];
+    syncStatus: string;
+    firePumpFormsReceived: number;
+    report: { id: string };
+  };
+  assert.deepEqual(firstBody.syncedFormatIds, ['fire_pumps']);
+  assert.equal(firstBody.syncStatus, 'synced');
+  assert.equal(firstBody.firePumpFormsReceived, 3);
+  assert.ok(firstBody.report.id);
+
+  const repeated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(repeated.status, 200);
+  const repeatedBody = await repeated.json() as { report: { id: string } };
+  assert.equal(repeatedBody.report.id, firstBody.report.id);
+  const reportData = database.getInspectionReportData(body.inspectionId);
+  assert.equal(reportData?.firePumps.length, 3);
+  assert.equal(reportData?.firePumps.find((form) => form.formType === 'pump_diesel')?.answers.length,
+    body.firePumps.find((form) => form.formType === 'pump_diesel')?.answers.length);
+  assert.equal(database.reportCount(body.inspectionId), 1);
+
+  const report = reportService.resolveDownload(firstBody.report.id);
+  assert.ok(report);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(report.filePath);
+  assertUnselectedVariableAreasAreEmpty(workbook, ['B Jockey', 'B Electrica', 'B Diesel']);
+  for (const formType of FIRE_PUMP_FORM_TYPES) {
+    const config = FIRE_PUMP_CONFIG[formType];
+    const sheet = workbook.getWorksheet(config.sheetName);
+    assert.ok(sheet);
+    assert.equal(sheet.getCell(config.generalCells.cliente).value, body.company.name);
+    assert.equal(sheet.getCell(config.generalCells.atencion).value, body.attention);
+    assert.equal(sheet.getCell(config.generalCells.area).value, body.area);
+    assert.equal(sheet.getCell(config.generalCells.fecha).value, body.date);
+    assert.equal(sheet.getCell(config.questions['1_1'].yesCell).value, 'X');
+    assert.equal(sheet.getCell(config.questions['1_1'].naCell).value, null);
+    assert.equal(sheet.getCell(config.questions['1_1'].noCell).value, null);
+    assert.equal(sheet.getCell(config.questions['1_2'].naCell).value, 'X');
+    assert.equal(sheet.getCell(config.questions['1_3'].noCell).value, 'X');
+    assert.equal(sheet.getCell(config.questions['1_1'].commentCell).value, `Comentario ${config.mobileId}`);
+    assert.equal(sheet.getCell(config.observationsCell).value, `Observaciones ${config.mobileId}`);
+    assert.equal(sheet.getCell(config.identityCells.potencia).value, 145);
+    assert.equal(sheet.getCell(config.identityCells.capacidad).value, '500 GPM');
+  }
+  assert.equal(workbook.getWorksheet('B Diesel')?.getCell('AA32').value, 13.5);
+  assert.equal(workbook.getWorksheet('B Diesel')?.getCell('AA49').value, '13.5');
+  assert.equal(workbook.getWorksheet('B Diesel')?.getCell('AA54').value, '13.5');
+  assert.equal(workbook.getWorksheet('B Diesel')?.getCell('AA59').value, 145);
+  assert.equal(fileHash(templatePath), templateHashBefore);
+
+  const changed = structuredClone(body);
+  const jockey = changed.firePumps.find((form) => form.formType === 'pump_jockey')!;
+  jockey.answers.find((answer) => answer.questionId === '1_1')!.answer = 'no';
+  jockey.updatedAt += 1;
+  const regenerated = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(changed),
+  });
+  assert.equal(regenerated.status, 200);
+  const regeneratedBody = await regenerated.json() as { report: { id: string } };
+  assert.equal(regeneratedBody.report.id, firstBody.report.id);
+  const regeneratedBook = new ExcelJS.Workbook();
+  await regeneratedBook.xlsx.readFile(reportService.resolveDownload(firstBody.report.id)!.filePath);
+  assert.equal(regeneratedBook.getWorksheet('B Jockey')?.getCell('Q17').value, null);
+  assert.equal(regeneratedBook.getWorksheet('B Jockey')?.getCell('U17').value, 'X');
+});
+
+test('Bombas rejects incomplete groups, duplicate questionIds and invalid answers without saving', async (context) => {
+  const { database, baseUrl } = await testServer(context);
+  const incomplete = firePumpsPayload('inspection-pumps-incomplete');
+  incomplete.selectedFormatIds = ['jockey'];
+  incomplete.firePumps = [incomplete.firePumps[0]];
+  const incompleteResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(incomplete),
+  });
+  assert.equal(incompleteResponse.status, 400);
+  assert.equal(database.inspectionCount(incomplete.inspectionId), 0);
+
+  const duplicate = firePumpsPayload('inspection-pumps-duplicate');
+  duplicate.firePumps[0].answers.push({ ...duplicate.firePumps[0].answers[0] });
+  const duplicateResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(duplicate),
+  });
+  assert.equal(duplicateResponse.status, 400);
+  assert.equal(database.inspectionCount(duplicate.inspectionId), 0);
+
+  const invalid = firePumpsPayload('inspection-pumps-invalid-answer') as any;
+  invalid.firePumps[2].answers[0].answer = 'talvez';
+  const invalidResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(invalid),
+  });
+  assert.equal(invalidResponse.status, 400);
+  assert.equal(database.inspectionCount(invalid.inspectionId), 0);
+});
+
+test('Bombas, Extintores, Hidrantes, firma and pump evidence share one official report', async (context) => {
+  const { database, reportService, baseUrl } = await testServer(context);
+  const inspectionId = 'inspection-all-supported-formats';
+  const body = {
+    ...firePumpsPayload(inspectionId),
+    extinguishers: payload(inspectionId).extinguishers,
+    hydrants: hydrantPayload(inspectionId, 2).hydrants,
+    selectedFormatIds: ['extintores', 'hidrantes', 'jockey', 'electrica', 'diesel'],
+  };
+  const sync = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  assert.equal(sync.status, 201);
+  const syncBody = await sync.json() as { syncedFormatIds: string[]; report: { id: string } };
+  assert.deepEqual(syncBody.syncedFormatIds, ['extintores', 'hidrantes', 'fire_pumps']);
+  assert.equal(database.reportCount(inspectionId), 1);
+
+  const evidenceId = '99999999-9999-4999-8999-999999999999';
+  const pumpEvidence = {
+    evidenceId,
+    formatType: 'fire_pumps',
+    formType: 'pump_diesel',
+    itemId: null,
+    fieldKey: 'diesel:photo_general',
+    caption: 'Tablero de bomba diésel',
+    locationNameSnapshot: 'Cuarto de bombas',
+    capturedAt: '2026-07-23T18:00:00.000Z',
+    updatedAt: '2026-07-23T18:00:00.000Z',
+  };
+  const upload = await uploadEvidence(baseUrl, inspectionId, pumpEvidence);
+  assert.equal(upload.status, 201);
+  const finalize = await fetch(`${baseUrl}/api/inspections/${inspectionId}/evidence/finalize`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ evidenceIds: [evidenceId] }),
+  });
+  assert.equal(finalize.status, 200);
+  const finalizeBody = await finalize.json() as { report: { id: string }; evidenceCount: number };
+  assert.equal(finalizeBody.report.id, syncBody.report.id);
+  assert.equal(finalizeBody.evidenceCount, 1);
+  assert.equal(database.listInspectionEvidence(inspectionId)[0].form_type, 'pump_diesel');
+
+  const resolved = reportService.resolveDownload(syncBody.report.id);
+  assert.ok(resolved);
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(resolved.filePath);
+  assert.equal(workbook.getWorksheet('EXTINTORES')?.getCell('A14').value, '1');
+  assert.equal(workbook.getWorksheet('HIDRANTES')?.getCell('A13').value, '1');
+  assert.equal(workbook.getWorksheet('B Jockey')?.getCell('Q17').value, 'X');
+  assert.equal(workbook.getWorksheet('B Electrica')?.getCell('Q17').value, 'X');
+  assert.equal(workbook.getWorksheet('B Diesel')?.getCell('Q17').value, 'X');
+  assert.ok(workbook.getWorksheet('FIRMAS'));
+  assert.ok(workbook.getWorksheet('EVIDENCIAS'));
+  const reportZip = await JSZip.loadAsync(fs.readFileSync(resolved.filePath));
+  assert.equal(Object.keys(reportZip.files)
+    .filter((name) => /^xl\/media\/evidence\d+-\d+\./.test(name)).length, 1);
 });
 
 test('atomic sync accepts Extintores and Hidrantes together in one report', async (context) => {

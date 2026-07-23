@@ -73,12 +73,14 @@ function FormFieldInner<T extends FieldValues>({ field, control, readOnly = fals
                 />
 
                 {/* Comment button — always visible, subtle to avoid accidental taps */}
-                {!readOnly && <Controller
+                <Controller
                   control={control}
                   name={commentKey}
                   render={({ field: { value: commentVal, onChange: onCommentChange } }) => (
                     <View style={styles.commentArea}>
-                      {showComment ? (
+                      {readOnly ? (
+                        commentVal ? <Text style={styles.readOnlyComment}>Comentario: {String(commentVal)}</Text> : null
+                      ) : showComment ? (
                         <View style={styles.commentInputWrapper}>
                           <TextInput
                             style={styles.commentInput}
@@ -115,7 +117,7 @@ function FormFieldInner<T extends FieldValues>({ field, control, readOnly = fals
                       )}
                     </View>
                   )}
-                />}
+                />
               </View>
             )}
 
@@ -170,6 +172,12 @@ const styles = StyleSheet.create({
   // ── Optional comment (appears when "No" is selected) ───────────────────────
   commentArea: {
     marginTop: 6,
+  },
+  readOnlyComment: {
+    color: '#475569',
+    fontSize: 13,
+    lineHeight: 19,
+    paddingVertical: 6,
   },
   commentChip: {
     alignSelf: 'flex-start',

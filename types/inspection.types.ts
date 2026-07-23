@@ -22,6 +22,7 @@ export interface SiteFormData {
   // property are interpreted as the complete Bombas group.
   selectedFormatIds?: string[];
   pumps: Record<string, Record<string, unknown>>;
+  firePumps?: FirePumpsData;
 }
 
 // form_type / form_version for the multi-pump site inspection.
@@ -76,6 +77,7 @@ export interface Photo {
   created_at: number;
   updated_at: number;
   format_type: string;
+  form_type: 'pump_jockey' | 'pump_electric' | 'pump_diesel' | null;
   item_id: string | null;
   location_name_snapshot: string | null;
   sync_status: 'pending' | 'uploading' | 'synced' | 'error';
@@ -94,3 +96,4 @@ export interface Signature {
   image_base64: string;
   signed_at: number;
 }
+import type { FirePumpsData } from './fire-pump.types';

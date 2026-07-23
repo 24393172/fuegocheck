@@ -17,6 +17,7 @@ import { CatalogBranch, CatalogCompany } from '../../types/catalog.types';
 import { loadSettings } from '../../lib/settings-manager';
 import { INSPECTION_FORMAT_OPTIONS, PUMPS_FORMAT_ID } from '../../lib/inspection-formats';
 import { SITE_FORM_TYPE, SITE_FORM_VERSION, SiteFormData } from '../../types/inspection.types';
+import { normalizeFirePumpsData } from '../../lib/fire-pumps';
 
 type Step = 'template' | 'client';
 
@@ -237,6 +238,9 @@ export default function NewInspectionScreen() {
       initialFormData.selectedFormatIds = selectedFormat
         ? [...selectedFormat.schemaIds]
         : [];
+      if (selectedFormat?.id === PUMPS_FORMAT_ID) {
+        initialFormData.firePumps = normalizeFirePumpsData(undefined).data;
+      }
 
       const inspection = await createInspection({
         form_type: SITE_FORM_TYPE,

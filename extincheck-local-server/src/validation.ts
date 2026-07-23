@@ -1,4 +1,10 @@
 import { z } from 'zod';
+import {
+  FIRE_PUMP_ALLOWED_IDS,
+  FIRE_PUMP_CONFIG,
+  FIRE_PUMP_FORM_TYPES,
+  FIRE_PUMP_MOBILE_IDS,
+} from './fire-pump-config.js';
 
 const id = z.string().trim().min(1).max(128);
 const shortText = z.string().trim().max(200);
@@ -172,7 +178,8 @@ export const inspectionFormatIdSchema = z.enum([
 
 export const evidenceMetadataSchema = z.object({
   evidenceId: z.string().uuid(),
-  formatType: z.union([inspectionFormatIdSchema, z.literal('legacy')]),
+  formatType: z.union([inspectionFormatIdSchema, z.literal('fire_pumps'), z.literal('legacy')]),
+  formType: z.enum(FIRE_PUMP_FORM_TYPES).nullable().optional(),
   itemId: id.nullable(),
   fieldKey: z.string().trim().min(1).max(200),
   caption: mediumText.nullable(),
@@ -194,16 +201,87 @@ const commonInspectionShape = {
   company: z.object({ id: id.nullish(), name: z.string().trim().min(1).max(200) }).strict(),
   branch: z.object({ id: id.nullish(), name: shortText }).strict().nullish(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must use YYYY-MM-DD'),
+  attention: shortText.default(''),
+  area: shortText.default(''),
   technician: z.object({ id: id.nullish(), name: z.string().trim().min(1).max(200) }).strict(),
   sourceDeviceId: id.nullish(),
   syncVersion: z.number().int().nonnegative(),
 };
+
+const firePumpAnswerSchema = z.object({
+  questionId: id,
+  answer: checkValue.optional(),
+  parameter: z.union([longText, z.number().finite()]).optional(),
+  reading: z.union([longText, z.number().finite()]).optional(),
+  comment: longText.optional(),
+}).strict().superRefine((answer, context) => {
+  if (answer.answer === undefined && answer.parameter === undefined
+      && answer.reading === undefined && answer.comment === undefined) {
+    context.addIssue({ code: 'custom', message: 'A pump answer must contain a value' });
+  }
+});
+
+const firePumpFormTypeSchema = z.enum(FIRE_PUMP_FORM_TYPES);
+const firePumpFormStatusSchema = z.enum([
+  'not_started', 'in_progress', 'complete', 'not_applicable',
+]);
+
+export const firePumpFormSchema = z.object({
+  formType: firePumpFormTypeSchema,
+  status: firePumpFormStatusSchema,
+  observations: longText,
+  updatedAt: z.number().int().nonnegative(),
+  answers: z.array(firePumpAnswerSchema).max(100),
+}).strict().superRefine((form, context) => {
+  const seen = new Set<string>();
+  const allowed = FIRE_PUMP_ALLOWED_IDS[form.formType];
+  form.answers.forEach((answer, index) => {
+    if (seen.has(answer.questionId)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['answers', index, 'questionId'],
+        message: 'Duplicate pump questionId',
+      });
+    }
+    if (!allowed.has(answer.questionId)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['answers', index, 'questionId'],
+        message: `Unknown questionId for ${form.formType}`,
+      });
+    }
+    seen.add(answer.questionId);
+  });
+  if (form.status === 'complete') {
+    const config = FIRE_PUMP_CONFIG[form.formType];
+    for (const questionId of Object.keys(config.questions)) {
+      if (!form.answers.some((answer) => answer.questionId === questionId && answer.answer)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['answers'],
+          message: `Complete form is missing answer ${questionId}`,
+        });
+      }
+    }
+    for (const questionId of ['potencia', 'capacidad', 'voltaje']) {
+      if (!form.answers.some((answer) => answer.questionId === questionId
+          && answer.reading !== undefined && answer.reading !== '')) {
+        context.addIssue({
+          code: 'custom',
+          path: ['answers'],
+          message: `Complete form is missing reading ${questionId}`,
+        });
+      }
+    }
+  }
+});
 
 export const inspectionSyncSchema = z.object({
   ...commonInspectionShape,
   selectedFormatIds: z.array(inspectionFormatIdSchema).min(1),
   extinguishers: z.array(extinguisherSchema).max(115).optional(),
   hydrants: z.array(hydrantSchema).max(38).optional(),
+  firePumps: z.array(firePumpFormSchema).max(3).optional(),
   signature: inspectionSignatureSchema.nullable().optional(),
   evidenceManifest: z.array(evidenceMetadataSchema).max(100).optional(),
 }).strict().superRefine((payload, context) => {
@@ -228,10 +306,43 @@ export const inspectionSyncSchema = z.object({
       recordIds.add(record.id);
     });
   }
+  const selectedPumpIds = FIRE_PUMP_MOBILE_IDS.filter((formatId) => selected.has(formatId));
+  if (selectedPumpIds.length > 0 && selectedPumpIds.length !== FIRE_PUMP_MOBILE_IDS.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['selectedFormatIds'],
+      message: 'Bombas must include jockey, electrica and diesel',
+    });
+  }
+  if (selectedPumpIds.length === FIRE_PUMP_MOBILE_IDS.length) {
+    const forms = payload.firePumps ?? [];
+    const formTypes = new Set(forms.map((form) => form.formType));
+    if (forms.length !== FIRE_PUMP_FORM_TYPES.length
+        || FIRE_PUMP_FORM_TYPES.some((formType) => !formTypes.has(formType))) {
+      context.addIssue({
+        code: 'custom',
+        path: ['firePumps'],
+        message: 'Bombas requires one Jockey, Electric and Diesel form',
+      });
+    }
+  } else if (payload.firePumps !== undefined) {
+    context.addIssue({
+      code: 'custom',
+      path: ['firePumps'],
+      message: 'Pump forms supplied for an unselected format',
+    });
+  }
   payload.evidenceManifest?.forEach((evidence, index) => {
-    if (evidence.formatType !== 'legacy' && !selected.has(evidence.formatType)) context.addIssue({
+    const selectedEvidenceFormat = evidence.formatType === 'fire_pumps'
+      ? FIRE_PUMP_MOBILE_IDS.every((id) => selected.has(id))
+      : evidence.formatType === 'legacy' || selected.has(evidence.formatType);
+    if (!selectedEvidenceFormat) context.addIssue({
       code: 'custom', path: ['evidenceManifest', index, 'formatType'],
       message: 'Evidence format is not selected for this inspection',
+    });
+    if (evidence.formatType === 'fire_pumps' && !evidence.formType) context.addIssue({
+      code: 'custom', path: ['evidenceManifest', index, 'formType'],
+      message: 'Pump evidence requires formType',
     });
   });
 });

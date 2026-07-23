@@ -46,6 +46,13 @@ export interface Report {
   signatureSignerName: string | null;
   signatureSignedAt: string | null;
   evidenceCount: number;
+  firePumpForms: Array<{
+    formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
+    status: string;
+    updatedAt: string;
+    answered: number;
+    total: number;
+  }>;
   templateVersion: string;
   companyName: string;
   inspectionDate: string;
@@ -55,6 +62,7 @@ export interface Report {
 export interface Evidence {
   id: string;
   formatType: string;
+  formType: string | null;
   itemId: string | null;
   equipmentLabel: string | null;
   fieldKey: string;

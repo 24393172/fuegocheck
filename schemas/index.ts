@@ -17,7 +17,7 @@ import { hidrantesForm } from './templates/hidrantes.schema';
 // The three pump forms that make up a site inspection, in the order shown in the
 // UI. Each `id` ('jockey' | 'diesel' | 'electrica') is also the key used inside
 // the inspection's form_data to store that pump's answers.
-export const PUMP_SCHEMAS: FormSchema[] = [jockeyForm, dieselForm, electricaForm]
+export const PUMP_SCHEMAS: FormSchema[] = [jockeyForm, electricaForm, dieselForm]
   .map((schema) => ({ ...schema, templateType: 'pump' as const }));
 export const ADDITIONAL_SCHEMAS: FormSchema[] = [
   { ...tableroAdForm, templateType: 'alarm' },

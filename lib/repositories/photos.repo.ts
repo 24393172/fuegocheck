@@ -4,7 +4,7 @@ import { Photo } from '../../types/inspection.types';
 
 type PhotoRow = Omit<Photo, 'is_deleted' | 'legacy'> & { is_deleted: number; legacy: number };
 type AddPhotoInput = Pick<Photo, 'inspection_id' | 'field_key' | 'local_uri' | 'thumbnail_uri' |
-  'caption' | 'format_type' | 'item_id' | 'location_name_snapshot'> & { id?: string; legacy?: boolean };
+  'caption' | 'format_type' | 'form_type' | 'item_id' | 'location_name_snapshot'> & { id?: string; legacy?: boolean };
 
 function fromRow(row: PhotoRow): Photo {
   return { ...row, is_deleted: row.is_deleted === 1, legacy: row.legacy === 1 };
@@ -24,18 +24,18 @@ export async function addPhoto(input: AddPhotoInput): Promise<Photo> {
   const photo: Photo = {
     id: input.id ?? generateId(), inspection_id: input.inspection_id, field_key: input.field_key,
     local_uri: input.local_uri, thumbnail_uri: input.thumbnail_uri, caption: input.caption,
-    format_type: input.format_type, item_id: input.item_id,
+    format_type: input.format_type, form_type: input.form_type, item_id: input.item_id,
     location_name_snapshot: input.location_name_snapshot, created_at: now, updated_at: now,
     sync_status: 'pending', synced_at: null, last_sync_attempt: null, sync_error: null,
     server_evidence_id: null, is_deleted: false, legacy: input.legacy ?? false,
   };
   await db.runAsync(`INSERT INTO photos (
     id, inspection_id, field_key, local_uri, thumbnail_uri, caption, created_at, updated_at,
-    format_type, item_id, location_name_snapshot, sync_status, synced_at, last_sync_attempt,
+    format_type, form_type, item_id, location_name_snapshot, sync_status, synced_at, last_sync_attempt,
     sync_error, server_evidence_id, is_deleted, legacy
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, [
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`, [
     photo.id, photo.inspection_id, photo.field_key, photo.local_uri, photo.thumbnail_uri,
-    photo.caption, photo.created_at, photo.updated_at, photo.format_type, photo.item_id,
+    photo.caption, photo.created_at, photo.updated_at, photo.format_type, photo.form_type, photo.item_id,
     photo.location_name_snapshot, photo.sync_status, photo.synced_at, photo.last_sync_attempt,
     photo.sync_error, photo.server_evidence_id, photo.legacy ? 1 : 0,
   ]);

@@ -44,7 +44,7 @@ export default function EquipmentEvidenceField({ inspectionId, formatType, itemI
       setBusy(true);
       await beforeCapture?.();
       savedFiles = await savePhoto(inspectionId, asset.uri, photoId, asset.width, asset.height);
-      await addPhoto({ id: photoId, inspection_id: inspectionId, format_type: formatType, item_id: itemId,
+      await addPhoto({ id: photoId, inspection_id: inspectionId, format_type: formatType, form_type: null, item_id: itemId,
         field_key: 'evidence', caption: replace?.caption ?? null,
         location_name_snapshot: locationNameSnapshot || null, local_uri: savedFiles.localUri,
         thumbnail_uri: savedFiles.thumbnailUri });

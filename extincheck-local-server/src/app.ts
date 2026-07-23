@@ -185,6 +185,8 @@ export function createApp(
         const supported: string[] = payload.selectedFormatIds.filter(
           (id) => id === 'extintores' || id === 'hidrantes'
         );
+        const hasFirePumps = Boolean(payload.firePumps?.length);
+        if (hasFirePumps) supported.push('fire_pumps');
         const previousSignature = database.getInspectionSignature(payload.inspectionId);
         const newSignaturePath = payload.signature && path.join(signaturesDirectory, `${randomUUID()}.png`);
         const stagedSignaturePath = newSignaturePath && `${newSignaturePath}.pending`;
@@ -198,6 +200,7 @@ export function createApp(
           const created = database.upsertInspectionMetadata(payload);
           if (payload.extinguishers) database.upsertInspection({ ...payload, extinguishers: payload.extinguishers }, false);
           if (payload.hydrants) database.upsertHydrantInspection({ ...payload, hydrants: payload.hydrants }, false);
+          if (payload.firePumps) database.upsertFirePumpForms(payload);
           database.clearUnselectedSupportedFormats(payload.inspectionId, payload.selectedFormatIds);
           database.setSelectedFormatIds(payload.inspectionId, payload.selectedFormatIds);
           if (payload.signature !== undefined) {
@@ -233,13 +236,23 @@ export function createApp(
           throw error;
         }
       });
+      const unsupportedFormatIds = payload.selectedFormatIds.filter((id) => {
+        if (['jockey', 'electrica', 'diesel'].includes(id)) return !result.supported.includes('fire_pumps');
+        return !result.supported.includes(id);
+      });
+      const selectedLogicalFormats = [
+        ...payload.selectedFormatIds.filter((id) => !['jockey', 'electrica', 'diesel'].includes(id)),
+        ...(payload.selectedFormatIds.some((id) => ['jockey', 'electrica', 'diesel'].includes(id))
+          ? ['fire_pumps'] : []),
+      ];
       response.status(result.created ? 201 : 200).json({
         ok: true, created: result.created, inspectionId: payload.inspectionId,
         extinguishersReceived: payload.extinguishers?.length ?? 0,
         hydrantsReceived: payload.hydrants?.length ?? 0,
+        firePumpFormsReceived: payload.firePumps?.length ?? 0,
         syncedAt: new Date().toISOString(), syncedFormatIds: result.supported,
-        unsupportedFormatIds: payload.selectedFormatIds.filter((id) => !result.supported.includes(id)),
-        syncStatus: result.supported.length === payload.selectedFormatIds.length ? 'synced' : 'partial',
+        unsupportedFormatIds,
+        syncStatus: result.supported.length === selectedLogicalFormats.length ? 'synced' : 'partial',
         report: result.report ? {
           id: result.report.id, filename: result.report.filename,
           downloadUrl: `/api/reports/${result.report.id}/download`, generatedAt: result.report.generated_at,
@@ -262,7 +275,11 @@ export function createApp(
       const inspectionId = request.params.inspectionId;
       const reportData = database.getInspectionReportData(inspectionId);
       if (!reportData) { response.status(404).json({ ok: false, message: 'Inspection not found' }); return; }
-      if (metadata.formatType !== 'legacy' && !reportData.inspection.selectedFormatIds.includes(metadata.formatType)) {
+      const evidenceFormatSelected = metadata.formatType === 'fire_pumps'
+        ? ['jockey', 'electrica', 'diesel'].every((id) => reportData.inspection.selectedFormatIds.includes(id))
+        : metadata.formatType === 'legacy'
+          || reportData.inspection.selectedFormatIds.includes(metadata.formatType);
+      if (!evidenceFormatSelected) {
         response.status(400).json({ ok: false, message: 'Evidence format is not selected for inspection' }); return;
       }
       if (!database.evidenceItemBelongs(inspectionId, metadata.formatType, metadata.itemId)) {
@@ -296,14 +313,16 @@ export function createApp(
         response.status(409).json({ ok: false, message: 'Inspection evidence limit reached' }); return;
       }
       const relatedCount = currentEvidence.filter((item) => item.id !== metadata.evidenceId
-        && item.format_type === metadata.formatType && item.item_id === metadata.itemId
+        && item.format_type === metadata.formatType
+        && item.form_type === (metadata.formType ?? null)
+        && item.item_id === metadata.itemId
         && (metadata.itemId !== null || item.field_key === metadata.fieldKey)).length;
       if (!existing && relatedCount >= 3) {
         response.status(409).json({ ok: false, message: 'Equipment evidence limit reached' }); return;
       }
       if (existing?.checksum === checksum) {
         const saved = database.upsertEvidence({
-          ...existing, format_type: metadata.formatType, item_id: metadata.itemId,
+          ...existing, format_type: metadata.formatType, form_type: metadata.formType ?? null, item_id: metadata.itemId,
           field_key: metadata.fieldKey, caption: metadata.caption,
           location_name_snapshot: metadata.locationNameSnapshot, captured_at: metadata.capturedAt,
         });
@@ -329,6 +348,7 @@ export function createApp(
         if (stagedThumbnail && newThumbnailPath) fs.renameSync(stagedThumbnail, newThumbnailPath);
         const saved = database.upsertEvidence({
           id: metadata.evidenceId, inspection_id: inspectionId, format_type: metadata.formatType,
+          form_type: metadata.formType ?? null,
           item_id: metadata.itemId, field_key: metadata.fieldKey, caption: metadata.caption,
           location_name_snapshot: metadata.locationNameSnapshot, mime_type: image.mimeType,
           filename: `evidence-${metadata.evidenceId}.${extension}`, file_path: newFilePath,
@@ -402,7 +422,8 @@ export function createApp(
         ? reportData?.extinguishers.find((record) => record.id === item.item_id)?.numero
         : item.format_type === 'hidrantes' ? reportData?.hydrants.find((record) => record.id === item.item_id)?.numero : null) ?? item.item_id : null;
       return {
-        id: item.id, formatType: item.format_type, itemId: item.item_id, equipmentLabel,
+        id: item.id, formatType: item.format_type, formType: item.form_type,
+        itemId: item.item_id, equipmentLabel,
         fieldKey: item.field_key, caption: item.caption, locationNameSnapshot: item.location_name_snapshot,
         capturedAt: item.captured_at, width: item.width, height: item.height,
         fileUrl: `/api/evidence/${item.id}/file`, thumbnailUrl: `/api/evidence/${item.id}/thumbnail`,
@@ -445,6 +466,7 @@ export function createApp(
         signatureSignerName: report.signature_signer_name,
         signatureSignedAt: report.signature_signed_at,
         evidenceCount: report.evidence_count,
+        firePumpForms: report.fire_pump_forms,
         templateVersion: report.template_version,
         companyName: report.company_name,
         inspectionDate: report.inspection_date,

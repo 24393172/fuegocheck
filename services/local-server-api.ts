@@ -29,9 +29,24 @@ export interface HydrantSyncPayload {
 }
 
 export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'extinguishers'> {
+  attention: string;
+  area: string;
   selectedFormatIds: string[];
   extinguishers?: ExtinguisherRecord[];
   hydrants?: HydrantRecord[];
+  firePumps?: Array<{
+    formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
+    status: 'not_started' | 'in_progress' | 'complete' | 'not_applicable';
+    observations: string;
+    updatedAt: number;
+    answers: Array<{
+      questionId: string;
+      answer?: 'si' | 'no' | 'na';
+      parameter?: string | number;
+      reading?: string | number;
+      comment?: string;
+    }>;
+  }>;
   signature?: {
     mimeType: 'image/png';
     dataBase64: string;
@@ -39,7 +54,7 @@ export interface InspectionSyncPayload extends Omit<ExtinguisherSyncPayload, 'ex
     signerName: string;
   } | null;
   evidenceManifest?: Array<{
-    evidenceId: string; formatType: string; itemId: string | null; fieldKey: string;
+    evidenceId: string; formatType: string; formType: string | null; itemId: string | null; fieldKey: string;
     caption: string | null; locationNameSnapshot: string | null; capturedAt: string; updatedAt: string;
   }>;
 }
@@ -101,7 +116,7 @@ export async function uploadInspectionEvidence(photo: Photo): Promise<{ id: stri
     const form = new FormData();
     form.append('inspectionId', photo.inspection_id);
     form.append('metadata', JSON.stringify({
-      evidenceId: photo.id, formatType: photo.format_type, itemId: photo.item_id,
+      evidenceId: photo.id, formatType: photo.format_type, formType: photo.form_type, itemId: photo.item_id,
       fieldKey: photo.field_key, caption: photo.caption,
       locationNameSnapshot: photo.location_name_snapshot,
       capturedAt: new Date(photo.created_at).toISOString(), updatedAt: new Date(photo.updated_at).toISOString(),

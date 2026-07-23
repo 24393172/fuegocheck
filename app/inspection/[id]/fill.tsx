@@ -16,7 +16,13 @@ import { FormSchema } from '../../../types/form.types';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { getPhotosByInspection } from '../../../lib/repositories/photos.repo';
 import { getSiteData, parseFormData } from '../../../lib/form-data';
-import { INSPECTION_SCHEMAS } from '../../../schemas';
+import { INSPECTION_SCHEMAS, PUMP_SCHEMAS } from '../../../schemas';
+import {
+  buildFirePumpForm,
+  firePumpFormToFlatValues,
+  normalizeFirePumpsData,
+} from '../../../lib/fire-pumps';
+import { FirePumpFormData, FirePumpFormId } from '../../../types/fire-pump.types';
 import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
@@ -68,6 +74,7 @@ export default function FillScreen() {
   // The full form_data (site + every pump). Autosave only replaces this pump's
   // slice, so the other pumps and the site data are never overwritten.
   const fullDataRef = useRef<Record<string, unknown>>({});
+  const firePumpFormRef = useRef<FirePumpFormData | null>(null);
 
   const { control, watch, reset, setValue, getValues } = useForm<FieldValues>({ defaultValues: {} });
   const watchedValues = useWatch({ control });
@@ -121,7 +128,21 @@ export default function FillScreen() {
         setSchema(s);
         setPhotosByKey(pumpPhotos);
         const pumps = fullData.pumps as Record<string, Record<string, unknown>>;
-        const currentValues = { ...(pumps[pump] ?? {}) };
+        const isFirePump = PUMP_SCHEMAS.some((item) => item.id === pump);
+        let currentValues: Record<string, unknown>;
+        if (isFirePump) {
+          const normalized = normalizeFirePumpsData(fullData);
+          const firePumpForm = normalized.data[pump as FirePumpFormId];
+          firePumpFormRef.current = firePumpForm;
+          currentValues = firePumpFormToFlatValues(firePumpForm);
+          if (normalized.changed || !fullData.firePumps) {
+            fullData.firePumps = normalized.data;
+            fullDataRef.current = fullData;
+            await updateInspection(id, { form_data: JSON.stringify(fullData) });
+          }
+        } else {
+          currentValues = { ...(pumps[pump] ?? {}) };
+        }
         if (pump === 'hidrantes') {
           const legacyLocation = typeof currentValues.ubicacion === 'string' ? currentValues.ubicacion : '';
           const existingLocationId = typeof currentValues.locationId === 'string' && currentValues.locationId
@@ -161,6 +182,23 @@ export default function FillScreen() {
 
   // Merges the current pump's values into the full form_data and persists it.
   function persist(values: FieldValues): Promise<void> {
+    if (schema && PUMP_SCHEMAS.some((item) => item.id === pump)) {
+      const normalized = normalizeFirePumpsData(fullDataRef.current);
+      const form = buildFirePumpForm(
+        schema,
+        values as Record<string, unknown>,
+        firePumpFormRef.current ?? normalized.data[pump as FirePumpFormId]
+      );
+      firePumpFormRef.current = form;
+      fullDataRef.current = {
+        ...fullDataRef.current,
+        firePumps: {
+          ...normalized.data,
+          [pump]: form,
+        },
+      };
+      return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });
+    }
     const pumps = (fullDataRef.current.pumps ?? {}) as Record<string, Record<string, unknown>>;
     fullDataRef.current = { ...fullDataRef.current, pumps: { ...pumps, [pump]: values } };
     return updateInspection(id, { form_data: JSON.stringify(fullDataRef.current) });

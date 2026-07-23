@@ -3,9 +3,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import JSZip from 'jszip';
 import { GeneratedReport, InspectionReportData, LocalDatabase } from './database.js';
+import { FIRE_PUMP_CONFIG, FIRE_PUMP_FORM_TYPES } from './fire-pump-config.js';
 
 const FORMAT_TYPE = 'inspection';
-const TEMPLATE_VERSION = 'cancun-extinguishers-hydrants-evidence-v4';
+const TEMPLATE_VERSION = 'cancun-fire-pumps-v5';
 
 const EXTINGUISHER_RANGE = { firstRow: 14, lastRow: 128, firstColumn: 1, lastColumn: 35 };
 const HYDRANT_RANGE = { firstRow: 13, lastRow: 50, firstColumn: 1, lastColumn: 35 };
@@ -218,6 +219,43 @@ function writeCell(sheetXml: string, address: string, value: string, strings: Sh
   return sheetXml.replace(expression, (cellXml) => cellWithValue(cellXml, strings.add(value)));
 }
 
+function writeNumberCell(sheetXml: string, address: string, value: number): string {
+  const expression = new RegExp(
+    `<c\\b(?=[^>]*\\br=(?:"${address}"|'${address}'))[^>]*?\\/>|` +
+    `<c\\b(?=[^>]*\\br=(?:"${address}"|'${address}'))[^>]*>[\\s\\S]*?<\\/c>`
+  );
+  if (!expression.test(sheetXml)) throw new Error(`Template cell ${address} was not found`);
+  return sheetXml.replace(expression, (cellXml) => {
+    const openingTag = /^<c\b[^>]*\/?\s*>/.exec(cellXml)?.[0];
+    if (!openingTag) throw new Error(`Template cell ${address} is invalid`);
+    const attributes = openingTag.slice(2, openingTag.length - 1).replace(/\/\s*$/, '')
+      .replace(/\s+t=(?:"[^"]*"|'[^']*')/g, '');
+    return `<c${attributes}><v>${value}</v></c>`;
+  });
+}
+
+function numericPumpReading(questionId: string, value: string | number): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const numericId = questionId === 'potencia'
+    || /(?:presion|segundos|_v_|_amp_|2_3_banco)/.test(questionId);
+  if (!numericId || !/^-?(?:\d+|\d*\.\d+)$/.test(value.trim())) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function writePumpValue(
+  sheetXml: string,
+  address: string,
+  questionId: string,
+  value: string | number,
+  strings: SharedStringWriter
+): string {
+  const numeric = numericPumpReading(questionId, value);
+  return numeric === null
+    ? writeCell(sheetXml, address, String(value), strings)
+    : writeNumberCell(sheetXml, address, numeric);
+}
+
 async function worksheetPath(zip: JSZip, sheetName: string): Promise<string> {
   const workbookXml = await zip.file('xl/workbook.xml')?.async('string');
   const relationshipsXml = await zip.file('xl/_rels/workbook.xml.rels')?.async('string');
@@ -247,7 +285,11 @@ function inlineCell(address: string, value: string, style: number): string {
 
 function formatNames(ids: string[]): string {
   const labels: Record<string, string> = { extintores: 'EXTINTORES', hidrantes: 'HIDRANTES' };
-  return ids.map((id) => labels[id] ?? id).join(', ');
+  const names = ids
+    .filter((id) => !['jockey', 'electrica', 'diesel'].includes(id))
+    .map((id) => labels[id] ?? id);
+  if (ids.some((id) => ['jockey', 'electrica', 'diesel'].includes(id))) names.push('BOMBAS');
+  return names.join(', ');
 }
 
 async function addSignaturesWorksheet(zip: JSZip, data: InspectionReportData): Promise<void> {
@@ -396,7 +438,10 @@ async function addEvidenceWorksheet(zip: JSZip, data: InspectionReportData): Pro
     const labelCell = `${left ? 'A' : 'S'}${startRow}`;
     const valueCell = `${left ? 'E' : 'W'}${startRow}`;
     const format = evidence.format_type === 'extintores' ? 'EXTINTORES'
-      : evidence.format_type === 'hidrantes' ? 'HIDRANTES' : evidence.format_type.toUpperCase();
+      : evidence.format_type === 'hidrantes' ? 'HIDRANTES'
+        : evidence.format_type === 'fire_pumps'
+          ? `BOMBAS · ${evidence.form_type?.replace('pump_', '').toUpperCase() ?? 'GENERAL'}`
+          : evidence.format_type.toUpperCase();
     const equipment = evidence.item_id
       ? (evidence.format_type === 'extintores' ? data.extinguishers.find((item) => item.id === evidence.item_id)?.numero
         : evidence.format_type === 'hidrantes' ? data.hydrants.find((item) => item.id === evidence.item_id)?.numero : null)
@@ -467,7 +512,11 @@ export class ExtinguisherReportService {
     if (!data) throw new Error(`Inspection not found: ${inspectionId}`);
     const includesExtinguishers = data.inspection.selectedFormatIds.includes('extintores');
     const includesHydrants = data.inspection.selectedFormatIds.includes('hidrantes');
-    if (!includesExtinguishers && !includesHydrants) throw new Error('Inspection has no supported formats');
+    const includesFirePumps = ['jockey', 'electrica', 'diesel']
+      .every((id) => data.inspection.selectedFormatIds.includes(id));
+    if (!includesExtinguishers && !includesHydrants && !includesFirePumps) {
+      throw new Error('Inspection has no supported formats');
+    }
     if (data.extinguishers.length > 115) throw new Error('A report cannot contain more than 115 extinguishers');
     if (data.hydrants.length > 38) throw new Error('A report cannot contain more than 38 hydrants');
 
@@ -475,6 +524,9 @@ export class ExtinguisherReportService {
     const filename = this.availableFilename(data, previous);
     const targetPath = path.join(this.reportsDirectory, filename);
     const temporaryPath = path.join(this.reportsDirectory, `.${randomUUID()}.tmp`);
+    const backupPath = previous?.file_path === targetPath && fs.existsSync(targetPath)
+      ? path.join(this.reportsDirectory, `.${randomUUID()}.backup`)
+      : null;
 
     try {
       if (!fs.existsSync(this.templatePath)) throw new Error(`Inspection template not found: ${this.templatePath}`);
@@ -547,6 +599,52 @@ export class ExtinguisherReportService {
         });
       }
 
+      if (includesFirePumps) {
+        for (const formType of FIRE_PUMP_FORM_TYPES) {
+          const config = FIRE_PUMP_CONFIG[formType];
+          const form = data.firePumps.find((item) => item.formType === formType);
+          if (!form) throw new Error(`Missing fire pump form: ${formType}`);
+          const pumpPath = await worksheetPath(zip, config.sheetName);
+          let pumpXml = cleanedSheets.get(pumpPath);
+          if (!pumpXml) throw new Error(`Cleaned worksheet was not found: ${config.sheetName}`);
+          pumpXml = writeCell(pumpXml, config.generalCells.cliente, data.inspection.companyName, strings);
+          pumpXml = writeCell(pumpXml, config.generalCells.atencion, data.inspection.attention, strings);
+          pumpXml = writeCell(pumpXml, config.generalCells.area, data.inspection.area, strings);
+          pumpXml = writeCell(pumpXml, config.generalCells.fecha, data.inspection.inspectionDate, strings);
+
+          const answers = new Map(form.answers.map((answer) => [answer.questionId, answer]));
+          for (const [questionId, cells] of Object.entries(config.questions)) {
+            const answer = answers.get(questionId);
+            if (!answer?.answer) continue;
+            const selectedCell = answer.answer === 'si'
+              ? cells.yesCell
+              : answer.answer === 'na'
+                ? cells.naCell
+                : cells.noCell;
+            pumpXml = writeCell(pumpXml, selectedCell, 'X', strings);
+            if (answer.comment) {
+              pumpXml = writeCell(pumpXml, cells.commentCell, answer.comment, strings);
+            }
+            if (cells.parameterCell && answer.parameter !== null && answer.parameter !== undefined) {
+              pumpXml = writePumpValue(
+                pumpXml, cells.parameterCell, questionId, answer.parameter, strings
+              );
+            }
+          }
+          for (const [questionId, address] of Object.entries(config.readingCells)) {
+            const reading = answers.get(questionId)?.reading;
+            if (reading === null || reading === undefined || reading === '') continue;
+            pumpXml = writePumpValue(pumpXml, address, questionId, reading, strings);
+          }
+          if (form.observations) {
+            pumpXml = writeCell(
+              pumpXml, config.observationsCell, form.observations, strings
+            );
+          }
+          cleanedSheets.set(pumpPath, pumpXml);
+        }
+      }
+
       cleanedSheets.set(extPath, extXml);
       cleanedSheets.set(hydPath, hydXml);
       for (const [sheetPath, sheetXml] of cleanedSheets) zip.file(sheetPath, sheetXml);
@@ -560,6 +658,7 @@ export class ExtinguisherReportService {
       zip.file('xl/sharedStrings.xml', strings.finalize(sharedStringReferences));
       const bytes = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
       fs.writeFileSync(temporaryPath, bytes);
+      if (backupPath) fs.copyFileSync(targetPath, backupPath);
       fs.copyFileSync(temporaryPath, targetPath);
       fs.rmSync(temporaryPath, { force: true });
 
@@ -567,9 +666,14 @@ export class ExtinguisherReportService {
         inspectionId, formatType: FORMAT_TYPE, filename, filePath: targetPath, generatedAt,
         status: 'generated', errorMessage: null, templateVersion: TEMPLATE_VERSION,
       });
+      if (backupPath) fs.rmSync(backupPath, { force: true });
       return report;
     } catch (error) {
       fs.rmSync(temporaryPath, { force: true });
+      if (backupPath && fs.existsSync(backupPath)) {
+        fs.copyFileSync(backupPath, targetPath);
+        fs.rmSync(backupPath, { force: true });
+      }
       if (previous?.file_path !== targetPath && isInsideDirectory(targetPath, this.reportsDirectory)) {
         fs.rmSync(targetPath, { force: true });
       }
@@ -597,7 +701,7 @@ export class ExtinguisherReportService {
   private availableFilename(data: InspectionReportData, previous: GeneratedReport | undefined): string {
     const company = sanitizeFilenamePart(data.inspection.companyName, 'Empresa').replace(/\s/g, '_');
     const date = sanitizeFilenamePart(data.inspection.inspectionDate, 'Fecha').replace(/\s/g, '_');
-    const prefix = data.extinguishers.length && data.hydrants.length
+    const prefix = data.firePumps.length || (data.extinguishers.length && data.hydrants.length)
       ? 'Reporte_Inspeccion'
       : data.hydrants.length ? 'Reporte_Hidrantes' : 'Reporte_Extintores';
     const base = `${prefix}_${company}_${date}_${shortInspectionId(data.inspection.id)}`;

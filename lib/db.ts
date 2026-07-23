@@ -54,6 +54,7 @@ export async function initializeDatabase(): Promise<void> {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       format_type TEXT NOT NULL DEFAULT 'legacy',
+      form_type TEXT,
       item_id TEXT,
       location_name_snapshot TEXT,
       sync_status TEXT NOT NULL DEFAULT 'pending',
@@ -159,7 +160,7 @@ export async function initializeDatabase(): Promise<void> {
   const hadEvidenceModel = photoColumnNames.has('format_type');
   for (const [column, definition] of [
     ['updated_at', 'INTEGER NOT NULL DEFAULT 0'], ['format_type', "TEXT NOT NULL DEFAULT 'legacy'"],
-    ['item_id', 'TEXT'], ['location_name_snapshot', 'TEXT'],
+    ['form_type', 'TEXT'], ['item_id', 'TEXT'], ['location_name_snapshot', 'TEXT'],
     ['sync_status', "TEXT NOT NULL DEFAULT 'pending'"], ['synced_at', 'INTEGER'],
     ['last_sync_attempt', 'INTEGER'], ['sync_error', 'TEXT'], ['server_evidence_id', 'TEXT'],
     ['is_deleted', 'INTEGER NOT NULL DEFAULT 0'], ['legacy', 'INTEGER NOT NULL DEFAULT 0'],
@@ -175,6 +176,18 @@ export async function initializeDatabase(): Promise<void> {
       sync_status = 'pending',
       legacy = 1;`);
   }
+  await database.execAsync(`UPDATE photos SET
+    form_type = CASE
+      WHEN format_type = 'jockey' THEN 'pump_jockey'
+      WHEN format_type = 'electrica' THEN 'pump_electric'
+      WHEN format_type = 'diesel' THEN 'pump_diesel'
+      ELSE form_type
+    END,
+    format_type = CASE
+      WHEN format_type IN ('jockey', 'electrica', 'diesel') THEN 'fire_pumps'
+      ELSE format_type
+    END
+    WHERE format_type IN ('jockey', 'electrica', 'diesel');`);
   if (!inspectionColumns.some((column) => column.name === 'pending_comment')) {
     await database.execAsync('ALTER TABLE inspections ADD COLUMN pending_comment TEXT;');
   }
@@ -239,5 +252,5 @@ export async function initializeDatabase(): Promise<void> {
     `UPDATE inspections SET status = 'completed' WHERE status = 'pending_sync'`
   );
 
-  await database.execAsync('PRAGMA user_version = 7;');
+  await database.execAsync('PRAGMA user_version = 8;');
 }

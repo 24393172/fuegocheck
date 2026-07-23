@@ -67,6 +67,14 @@ export default function PhotoField({
       );
       const { localUri, thumbnailUri } = savedFiles;
 
+      const pumpPrefix = fieldKey.includes(':') ? fieldKey.split(':')[0] : null;
+      const pumpFormType = pumpPrefix === 'jockey'
+        ? 'pump_jockey'
+        : pumpPrefix === 'electrica'
+          ? 'pump_electric'
+          : pumpPrefix === 'diesel'
+            ? 'pump_diesel'
+            : null;
       const saved = await addPhoto({
         id: photoId,
         inspection_id: inspectionId,
@@ -74,7 +82,8 @@ export default function PhotoField({
         local_uri: localUri,
         thumbnail_uri: thumbnailUri,
         caption: null,
-        format_type: fieldKey.includes(':') ? fieldKey.split(':')[0] : 'legacy',
+        format_type: pumpFormType ? 'fire_pumps' : pumpPrefix ?? 'legacy',
+        form_type: pumpFormType,
         item_id: null,
         location_name_snapshot: null,
         legacy: !fieldKey.includes(':'),

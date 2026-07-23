@@ -2,7 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { ExtinguisherInspectionPayload, HydrantInspectionPayload } from './validation.js';
+import {
+  ExtinguisherInspectionPayload,
+  HydrantInspectionPayload,
+  InspectionSyncPayload,
+} from './validation.js';
+import { FIRE_PUMP_CONFIG, FIRE_PUMP_MOBILE_IDS } from './fire-pump-config.js';
 
 export class LocalDatabase {
   private readonly database: DatabaseSync;
@@ -18,6 +23,8 @@ export class LocalDatabase {
         company_name TEXT NOT NULL,
         branch_id TEXT,
         branch_name TEXT,
+        attention TEXT NOT NULL DEFAULT '',
+        area TEXT NOT NULL DEFAULT '',
         inspection_date TEXT NOT NULL,
         technician_id TEXT,
         technician_name TEXT NOT NULL,
@@ -89,6 +96,36 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_hydrants_inspection
       ON hydrants(inspection_id);
 
+      CREATE TABLE IF NOT EXISTS inspection_forms (
+        id TEXT PRIMARY KEY,
+        inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+        form_type TEXT NOT NULL CHECK (form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')),
+        status TEXT NOT NULL CHECK (status IN ('not_started', 'in_progress', 'complete', 'not_applicable')),
+        observations TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (inspection_id, form_type)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_forms_inspection
+      ON inspection_forms(inspection_id);
+
+      CREATE TABLE IF NOT EXISTS inspection_answers (
+        id TEXT PRIMARY KEY,
+        form_id TEXT NOT NULL REFERENCES inspection_forms(id) ON DELETE CASCADE,
+        question_id TEXT NOT NULL,
+        answer TEXT CHECK (answer IS NULL OR answer IN ('si', 'no', 'na')),
+        parameter_value TEXT,
+        reading_value,
+        comment TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (form_id, question_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_inspection_answers_form
+      ON inspection_answers(form_id);
+
       CREATE TABLE IF NOT EXISTS inspection_signatures (
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
@@ -109,6 +146,7 @@ export class LocalDatabase {
         id TEXT PRIMARY KEY,
         inspection_id TEXT NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
         format_type TEXT NOT NULL,
+        form_type TEXT,
         item_id TEXT,
         field_key TEXT NOT NULL,
         caption TEXT,
@@ -153,10 +191,25 @@ export class LocalDatabase {
     `);
     this.ensureColumn('inspections', 'branch_id', 'TEXT');
     this.ensureColumn('inspections', 'branch_name', 'TEXT');
+    this.ensureColumn('inspections', 'attention', "TEXT NOT NULL DEFAULT ''");
+    this.ensureColumn('inspections', 'area', "TEXT NOT NULL DEFAULT ''");
     this.ensureColumn('inspections', 'selected_format_ids', "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn('generated_reports', 'last_attempt_at', 'TEXT');
     this.ensureColumn('generated_reports', 'last_attempt_status', 'TEXT');
     this.ensureColumn('generated_reports', 'last_attempt_error', 'TEXT');
+    this.ensureColumn('inspection_evidence', 'form_type', 'TEXT');
+    this.database.exec(`UPDATE inspection_evidence SET
+      form_type = CASE
+        WHEN format_type = 'jockey' THEN 'pump_jockey'
+        WHEN format_type = 'electrica' THEN 'pump_electric'
+        WHEN format_type = 'diesel' THEN 'pump_diesel'
+        ELSE form_type
+      END,
+      format_type = CASE
+        WHEN format_type IN ('jockey', 'electrica', 'diesel') THEN 'fire_pumps'
+        ELSE format_type
+      END
+      WHERE format_type IN ('jockey', 'electrica', 'diesel');`);
     this.database.exec(`
       UPDATE inspections SET selected_format_ids = json_array(
         CASE WHEN EXISTS (SELECT 1 FROM extinguishers e WHERE e.inspection_id = inspections.id) THEN 'extintores' END,
@@ -208,6 +261,64 @@ export class LocalDatabase {
     if (!selectedIds.includes('hidrantes')) {
       this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(inspectionId);
     }
+    if (!FIRE_PUMP_MOBILE_IDS.some((id) => selectedIds.includes(id))) {
+      this.database.prepare('DELETE FROM inspection_forms WHERE inspection_id = ?').run(inspectionId);
+    }
+  }
+
+  upsertFirePumpForms(payload: InspectionSyncPayload) {
+    if (!payload.firePumps) return;
+    const now = new Date().toISOString();
+    const getExisting = this.database.prepare(
+      'SELECT id, created_at AS createdAt FROM inspection_forms WHERE inspection_id = ? AND form_type = ?'
+    );
+    const upsertForm = this.database.prepare(`
+      INSERT INTO inspection_forms (
+        id, inspection_id, form_type, status, observations, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(inspection_id, form_type) DO UPDATE SET
+        status = excluded.status,
+        observations = excluded.observations,
+        updated_at = excluded.updated_at
+    `);
+    const deleteAnswers = this.database.prepare('DELETE FROM inspection_answers WHERE form_id = ?');
+    const insertAnswer = this.database.prepare(`
+      INSERT INTO inspection_answers (
+        id, form_id, question_id, answer, parameter_value, reading_value,
+        comment, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const form of payload.firePumps) {
+      const existing = getExisting.get(payload.inspectionId, form.formType) as
+        { id: string; createdAt: string } | undefined;
+      const formId = existing?.id ?? randomUUID();
+      const updatedAt = form.updatedAt ? new Date(form.updatedAt).toISOString() : now;
+      upsertForm.run(
+        formId,
+        payload.inspectionId,
+        form.formType,
+        form.status,
+        form.observations,
+        existing?.createdAt ?? now,
+        updatedAt
+      );
+      deleteAnswers.run(formId);
+      for (const answer of form.answers) {
+        const fixedParameter = FIRE_PUMP_CONFIG[form.formType]
+          .questions[answer.questionId]?.fixedParameter;
+        insertAnswer.run(
+          randomUUID(),
+          formId,
+          answer.questionId,
+          answer.answer ?? null,
+          fixedParameter ?? answer.parameter ?? null,
+          answer.reading ?? null,
+          answer.comment ?? null,
+          now,
+          updatedAt
+        );
+      }
+    }
   }
   getInspectionSignature(inspectionId: string, signatureType = 'technician'): InspectionSignature | undefined {
     return this.database.prepare(`SELECT id, inspection_id, signature_type, mime_type, file_path,
@@ -253,7 +364,7 @@ export class LocalDatabase {
     return false;
   }
   getEvidence(id: string): InspectionEvidence | undefined {
-    return this.database.prepare(`SELECT id, inspection_id, format_type, item_id, field_key, caption,
+    return this.database.prepare(`SELECT id, inspection_id, format_type, form_type, item_id, field_key, caption,
       location_name_snapshot, mime_type, filename, file_path, thumbnail_path, file_size,
       width, height, checksum, captured_at, created_at, updated_at
       FROM inspection_evidence WHERE id = ?`).get(id) as InspectionEvidence | undefined;
@@ -275,18 +386,18 @@ export class LocalDatabase {
     const now = new Date().toISOString();
     const existing = this.getEvidence(input.id);
     this.database.prepare(`INSERT INTO inspection_evidence (
-      id, inspection_id, format_type, item_id, field_key, caption, location_name_snapshot,
+      id, inspection_id, format_type, form_type, item_id, field_key, caption, location_name_snapshot,
       mime_type, filename, file_path, thumbnail_path, file_size, width, height, checksum,
       captured_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET format_type=excluded.format_type, item_id=excluded.item_id,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET format_type=excluded.format_type, form_type=excluded.form_type, item_id=excluded.item_id,
       field_key=excluded.field_key, caption=excluded.caption,
       location_name_snapshot=excluded.location_name_snapshot, mime_type=excluded.mime_type,
       filename=excluded.filename, file_path=excluded.file_path,
       thumbnail_path=excluded.thumbnail_path, file_size=excluded.file_size,
       width=excluded.width, height=excluded.height, checksum=excluded.checksum,
       captured_at=excluded.captured_at, updated_at=excluded.updated_at`).run(
-      input.id, input.inspection_id, input.format_type, input.item_id, input.field_key,
+      input.id, input.inspection_id, input.format_type, input.form_type, input.item_id, input.field_key,
       input.caption, input.location_name_snapshot, input.mime_type, input.filename,
       input.file_path, input.thumbnail_path, input.file_size, input.width, input.height,
       input.checksum, input.captured_at, existing?.created_at ?? now, now
@@ -300,22 +411,24 @@ export class LocalDatabase {
       .run(evidenceId, inspectionId);
     return evidence;
   }
-  upsertInspectionMetadata(payload: Omit<ExtinguisherInspectionPayload, 'extinguishers'>): boolean {
+  upsertInspectionMetadata(payload: InspectionSyncPayload): boolean {
     const now = new Date().toISOString();
     const existing = this.database.prepare('SELECT received_at FROM inspections WHERE id = ?')
       .get(payload.inspectionId) as { received_at: string } | undefined;
     this.database.prepare(`
       INSERT INTO inspections (
-        id, company_id, company_name, branch_id, branch_name, inspection_date, technician_id,
+        id, company_id, company_name, branch_id, branch_name, attention, area, inspection_date, technician_id,
         technician_name, received_at, updated_at, source_device_id, sync_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET company_id=excluded.company_id, company_name=excluded.company_name,
         branch_id=excluded.branch_id, branch_name=excluded.branch_name,
+        attention=excluded.attention, area=excluded.area,
         inspection_date=excluded.inspection_date, technician_id=excluded.technician_id,
         technician_name=excluded.technician_name, updated_at=excluded.updated_at,
         source_device_id=excluded.source_device_id, sync_version=excluded.sync_version
     `).run(payload.inspectionId, payload.company.id ?? null, payload.company.name,
-      payload.branch?.id ?? null, payload.branch?.name ?? null, payload.date,
+      payload.branch?.id ?? null, payload.branch?.name ?? null,
+      payload.attention, payload.area, payload.date,
       payload.technician.id ?? null, payload.technician.name, existing?.received_at ?? now,
       now, payload.sourceDeviceId ?? null, payload.syncVersion);
     return !existing;
@@ -530,6 +643,7 @@ export class LocalDatabase {
     const inspection = this.database.prepare(`
       SELECT id, company_id AS companyId, company_name AS companyName,
              branch_id AS branchId, branch_name AS branchName,
+             attention, area,
              inspection_date AS inspectionDate, technician_id AS technicianId,
              technician_name AS technicianName, selected_format_ids AS selectedFormatIdsJson
       FROM inspections WHERE id = ?
@@ -557,10 +671,24 @@ export class LocalDatabase {
       FROM hydrants WHERE inspection_id = ? ORDER BY rowid
     `).all(inspectionId) as Array<Omit<HydrantInspectionPayload['hydrants'][number], 'customLocation'> & { customLocation: number }>;
     const hydrants = rawHydrants.map((item) => ({ ...item, customLocation: item.customLocation === 1 }));
+    const firePumpForms = this.database.prepare(`
+      SELECT id, form_type AS formType, status, observations,
+             created_at AS createdAt, updated_at AS updatedAt
+      FROM inspection_forms WHERE inspection_id = ? ORDER BY form_type
+    `).all(inspectionId) as unknown as InspectionReportData['firePumps'];
+    const answerQuery = this.database.prepare(`
+      SELECT question_id AS questionId, answer, parameter_value AS parameter,
+             reading_value AS reading, comment, created_at AS createdAt,
+             updated_at AS updatedAt
+      FROM inspection_answers WHERE form_id = ? ORDER BY rowid
+    `);
+    firePumpForms.forEach((form) => {
+      form.answers = answerQuery.all(form.id) as InspectionReportData['firePumps'][number]['answers'];
+    });
     inspection.selectedFormatIds = JSON.parse(inspection.selectedFormatIdsJson || '[]') as string[];
     const signature = this.getInspectionSignature(inspectionId);
     const evidence = this.listInspectionEvidence(inspectionId);
-    return { inspection, extinguishers, hydrants, signature, evidence };
+    return { inspection, extinguishers, hydrants, firePumps: firePumpForms, signature, evidence };
   }
 
   saveGeneratedReport(input: {
@@ -632,13 +760,35 @@ export class LocalDatabase {
     try { ids = JSON.parse(report.selected_format_ids || '[]') as string[]; } catch { /* legacy row */ }
     const signature = this.getInspectionSignature(report.inspection_id);
     const evidenceCount = this.listInspectionEvidence(report.inspection_id).length;
+    const pumpForms = this.database.prepare(`
+      SELECT f.form_type AS formType, f.status, f.updated_at AS updatedAt,
+             COUNT(CASE WHEN a.answer IS NOT NULL THEN 1 END) AS answered
+      FROM inspection_forms f
+      LEFT JOIN inspection_answers a ON a.form_id = f.id
+      WHERE f.inspection_id = ?
+      GROUP BY f.id ORDER BY f.form_type
+    `).all(report.inspection_id) as Array<{
+      formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
+      status: string;
+      updatedAt: string;
+      answered: number;
+    }>;
+    const rawFormats = ids.filter((id) => !['jockey', 'diesel', 'electrica'].includes(id))
+      .map((id) => labels[id] ?? id);
+    if (ids.some((id) => ['jockey', 'diesel', 'electrica'].includes(id))) {
+      rawFormats.push('Bombas');
+    }
     return {
       ...report,
-      formats: ids.map((id) => labels[id] ?? id).join(', ') || report.formats,
+      formats: rawFormats.join(', ') || report.formats,
       signature_available: signature ? 1 : 0,
       signature_signer_name: signature?.signer_name ?? null,
       signature_signed_at: signature?.signed_at ?? null,
       evidence_count: evidenceCount,
+      fire_pump_forms: pumpForms.map((form) => ({
+        ...form,
+        total: Object.keys(FIRE_PUMP_CONFIG[form.formType].questions).length,
+      })),
     };
   }
 
@@ -778,6 +928,13 @@ export interface GeneratedReport {
   signature_signer_name: string | null;
   signature_signed_at: string | null;
   evidence_count: number;
+  fire_pump_forms: Array<{
+    formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
+    status: string;
+    updatedAt: string;
+    answered: number;
+    total: number;
+  }>;
 }
 
 export interface InspectionSignature {
@@ -796,6 +953,7 @@ export interface InspectionEvidence {
   id: string;
   inspection_id: string;
   format_type: string;
+  form_type: string | null;
   item_id: string | null;
   field_key: string;
   caption: string | null;
@@ -820,6 +978,8 @@ export interface InspectionReportData {
     companyName: string;
     branchId: string | null;
     branchName: string | null;
+    attention: string;
+    area: string;
     inspectionDate: string;
     technicianId: string | null;
     technicianName: string;
@@ -828,6 +988,23 @@ export interface InspectionReportData {
   };
   extinguishers: ExtinguisherInspectionPayload['extinguishers'];
   hydrants: HydrantInspectionPayload['hydrants'];
+  firePumps: Array<{
+    id: string;
+    formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
+    status: 'not_started' | 'in_progress' | 'complete' | 'not_applicable';
+    observations: string;
+    createdAt: string;
+    updatedAt: string;
+    answers: Array<{
+      questionId: string;
+      answer: 'si' | 'no' | 'na' | null;
+      parameter: string | number | null;
+      reading: string | number | null;
+      comment: string | null;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  }>;
   signature: InspectionSignature | undefined;
   evidence: InspectionEvidence[];
 }

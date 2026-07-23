@@ -29,6 +29,12 @@ import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { PUMP_SCHEMAS } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
 import { Inspection, Signature } from '../../../types/inspection.types';
+import { FirePumpsData } from '../../../types/fire-pump.types';
+import {
+  firePumpPayloadForms,
+  firePumpProgress,
+  normalizeFirePumpsData,
+} from '../../../lib/fire-pumps';
 import { resolveSyncOutcome } from '../../../lib/sync-status';
 import {
   checkServerHealth,
@@ -81,6 +87,9 @@ export default function InspectionIndexScreen() {
   const router = useRouter();
   const [inspection, setInspection] = useState<Inspection | null>(null);
   const [pumpsData, setPumpsData] = useState<Record<string, Record<string, unknown>>>({});
+  const [firePumps, setFirePumps] = useState<FirePumpsData>(
+    () => normalizeFirePumpsData(undefined).data
+  );
   const [signature, setSignature] = useState<Signature | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingComment, setPendingComment] = useState('');
@@ -104,9 +113,22 @@ export default function InspectionIndexScreen() {
             return;
           }
           const data = parseFormData(insp);
-          setInspection(insp);
+          const normalizedFirePumps = normalizeFirePumpsData(data);
+          const selectedIds = normalizeSelectedFormatIds(data.selectedFormatIds);
+          const hasSelectedFirePumps = PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id));
+          let loadedInspection = insp;
+          if (hasSelectedFirePumps && (!data.firePumps || normalizedFirePumps.changed)) {
+            const normalizedFormData = JSON.stringify({
+              ...data,
+              firePumps: normalizedFirePumps.data,
+            });
+            await updateInspection(id, { form_data: normalizedFormData });
+            loadedInspection = await getInspection(id) ?? { ...insp, form_data: normalizedFormData };
+          }
+          setInspection(loadedInspection);
           setPendingComment(insp.pending_comment ?? '');
           setPumpsData((data.pumps ?? {}) as Record<string, Record<string, unknown>>);
+          setFirePumps(normalizedFirePumps.data);
           setSignature(sigs.find((item) => item.signer_type === 'technician') ?? null);
         } catch (error) {
           console.error('[inspection] Failed to load:', error);
@@ -120,6 +142,19 @@ export default function InspectionIndexScreen() {
       return () => { cancelled = true; };
     }, [id, router])
   );
+
+  function getFormatProgress(schema: FormSchema) {
+    if (PUMP_SCHEMAS.some((item) => item.id === schema.id)) {
+      return firePumpProgress(
+        schema,
+        firePumps[schema.id as keyof FirePumpsData]
+      );
+    }
+    return {
+      ...formatProgress(schema, pumpsData[schema.id] ?? {}),
+      missing: [] as string[],
+    };
+  }
 
   async function handleAddFormat(option: InspectionFormatOption) {
     if (!inspection || isAddingFormat) return;
@@ -158,13 +193,19 @@ export default function InspectionIndexScreen() {
 
     const selectedIds = normalizeSelectedFormatIds(parseFormData(inspection).selectedFormatIds);
     const formats = schemasForSelectedFormatIds(selectedIds);
-    const hasIncompleteFormat = formats.some(
-      (schema) => !formatProgress(schema, pumpsData[schema.id] ?? {}).complete
-    );
-    if (hasIncompleteFormat) {
+    const incompleteFormats = formats
+      .map((schema) => ({ schema, progress: getFormatProgress(schema) }))
+      .filter((item) => !item.progress.complete);
+    if (incompleteFormats.length) {
+      const details = incompleteFormats
+        .filter((item) => item.progress.missing.length)
+        .map((item) => `${item.schema.name}: ${item.progress.missing.slice(0, 8).join(', ')}`)
+        .join('\n');
       Alert.alert(
         'Formatos incompletos',
-        'Todavía hay formatos sin completar. Completa todos los formatos antes de enviar la inspección.'
+        details
+          ? `No se puede completar la inspección. Faltan:\n${details}`
+          : 'Todavía hay formatos sin completar. Completa todos los formatos antes de enviar la inspección.'
       );
       return;
     }
@@ -223,6 +264,11 @@ export default function InspectionIndexScreen() {
         normalizedPumps.hidrantes = normalized.collection;
         normalizationChanged = normalizationChanged || normalized.changed;
       }
+      const normalizedFirePumps = normalizeFirePumpsData(fullData);
+      if (PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id))) {
+        fullData.firePumps = normalizedFirePumps.data;
+        normalizationChanged = normalizationChanged || normalizedFirePumps.changed;
+      }
       if (normalizationChanged) {
         const normalizedFormData = JSON.stringify({
           ...fullData,
@@ -252,6 +298,8 @@ export default function InspectionIndexScreen() {
           ? { id: siteData.branchId ?? null, name: siteData.branchNameSnapshot ?? '' }
           : null,
         date: inspectionDateToIso(siteData.fecha),
+        attention: siteData.atencion,
+        area: siteData.area,
         technician: { id: null, name: siteData.tecnico || currentInspection.technician_name },
         syncVersion: currentInspection.updated_at,
       };
@@ -264,6 +312,9 @@ export default function InspectionIndexScreen() {
           ? normalizeExtinguisherCollection(currentPumps.extintores).collection.items : undefined,
         hydrants: selectedIds.includes('hidrantes')
           ? normalizeHydrantsData(currentPumps.hidrantes).collection.items : undefined,
+        firePumps: PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id))
+          ? firePumpPayloadForms(normalizeFirePumpsData(fullData).data)
+          : undefined,
         signature: signature ? {
           mimeType: 'image/png',
           dataBase64: signature.image_base64.replace(/^data:image\/png;base64,/, ''),
@@ -271,7 +322,7 @@ export default function InspectionIndexScreen() {
           signerName: currentInspection.technician_name,
         } : null,
         evidenceManifest: activeEvidence.map((photo) => ({
-          evidenceId: photo.id, formatType: photo.format_type, itemId: photo.item_id,
+          evidenceId: photo.id, formatType: photo.format_type, formType: photo.form_type, itemId: photo.item_id,
           fieldKey: photo.field_key, caption: photo.caption,
           locationNameSnapshot: photo.location_name_snapshot,
           capturedAt: new Date(photo.created_at).toISOString(), updatedAt: new Date(photo.updated_at).toISOString(),
@@ -321,7 +372,10 @@ export default function InspectionIndexScreen() {
         official_report_filename: finalized.report.filename,
         official_report_download_url: finalized.report.downloadUrl,
       } : current);
-      Alert.alert('Sincronización completa', 'Inspección sincronizada correctamente con el servidor local.');
+      Alert.alert(
+        outcome.status === 'synced' ? 'Sincronización completa' : 'Sincronización parcial',
+        outcome.message ?? 'Inspección sincronizada correctamente con el servidor local.'
+      );
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : 'Unknown synchronization error';
       const evidencePending = rawMessage.startsWith('EVIDENCE_PENDING:');
@@ -371,9 +425,10 @@ export default function InspectionIndexScreen() {
   const pumpIds = new Set(PUMP_SCHEMAS.map((schema) => schema.id));
   const pumpSchemas = schemas.filter((schema) => pumpIds.has(schema.id));
   const otherSchemas = schemas.filter((schema) => !pumpIds.has(schema.id));
+  const completedPumpForms = pumpSchemas.filter((schema) => getFormatProgress(schema).complete).length;
   const includesExtinguishers = selectedFormatIds.includes('extintores');
   const includesHydrants = selectedFormatIds.includes('hidrantes');
-  const progress = schemas.map((schema) => formatProgress(schema, pumpsData[schema.id] ?? {}));
+  const progress = schemas.map((schema) => getFormatProgress(schema));
   const allComplete = progress.length > 0 && progress.every((item) => item.complete);
   const anyStarted = progress.some((item) => item.hasAnyData);
   const overallStatus = inspection.status === 'pending'
@@ -385,7 +440,7 @@ export default function InspectionIndexScreen() {
         : 'Sin empezar';
 
   function renderFormatCard(schema: FormSchema) {
-    const item = formatProgress(schema, pumpsData[schema.id] ?? {});
+    const item = getFormatProgress(schema);
     const statusText = !item.hasAnyData
       ? 'Sin empezar'
       : item.complete
@@ -441,7 +496,12 @@ export default function InspectionIndexScreen() {
           <View style={styles.formatGroup}>
             <View style={styles.groupHeader}>
               <Ionicons name="water" size={18} color="#2563eb" />
-              <Text style={styles.groupTitle}>Bombas contra incendio</Text>
+              <View>
+                <Text style={styles.groupTitle}>Bombas contra incendio</Text>
+                <Text style={styles.groupProgress}>
+                  {completedPumpForms} de {pumpSchemas.length} formularios completos
+                </Text>
+              </View>
             </View>
             {pumpSchemas.map(renderFormatCard)}
           </View>
@@ -561,6 +621,7 @@ const styles = StyleSheet.create({
   formatGroup: { padding: 10, gap: 8, borderRadius: 14, backgroundColor: '#eff6ff', borderWidth: 1, borderColor: '#bfdbfe' },
   groupHeader: { paddingHorizontal: 4, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 7 },
   groupTitle: { color: '#1e3a5f', fontSize: 14, fontWeight: '800' },
+  groupProgress: { color: '#64748b', fontSize: 12, marginTop: 2 },
   formatRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ffffff', borderRadius: 12, borderWidth: 1, borderColor: '#e5e7eb', padding: 14 },
   formatInfo: { flex: 1 },
   formatName: { fontSize: 15, fontWeight: '600', color: '#111827' },
