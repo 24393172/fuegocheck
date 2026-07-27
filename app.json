@@ -39,6 +39,15 @@
         {
           "cameraPermission": "La aplicación necesita acceso a la cámara para tomar fotos de la inspección."
         }
+      ],
+      "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "web": {
