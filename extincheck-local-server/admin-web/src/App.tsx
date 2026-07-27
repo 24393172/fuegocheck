@@ -14,6 +14,7 @@ import { Branch, Company, EquipmentType, Evidence, Location, Report } from './ty
 
 type View = 'companies' | 'locations' | 'reports' | 'maintenance';
 type Notice = { kind: 'success' | 'error'; text: string } | null;
+const LOCATION_COMPANY_SESSION_KEY = 'extincheck.locations.selectedCompanyId';
 
 export function App() {
   const [auth, setAuth] = useState<
@@ -93,10 +94,10 @@ function LoginView({ onAuthenticated }: { onAuthenticated: (session: AdminSessio
 function AdminPanel({ session, onSignedOut }: { session: AdminSession; onSignedOut: () => void }) {
   const [view, setView] = useState<View>('companies');
   const [notice, setNotice] = useState<Notice>(null);
-  const notify = (kind: 'success' | 'error', text: string) => {
+  const notify = useCallback((kind: 'success' | 'error', text: string) => {
     setNotice({ kind, text });
     window.setTimeout(() => setNotice(null), 4200);
-  };
+  }, []);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -233,31 +234,111 @@ function CompanyModal({ company, onClose, onSaved }: { company: Company | null; 
   const [businessName, setBusinessName] = useState(company?.businessName ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [nameError, setNameError] = useState('');
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); setSaving(true); setError('');
+    event.preventDefault();
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      setNameError('Escribe el nombre de la empresa.');
+      return;
+    }
+    setSaving(true); setError(''); setNameError('');
     try {
       await api(company ? `/api/companies/${company.id}` : '/api/companies', {
-        method: company ? 'PUT' : 'POST', body: JSON.stringify({ name, businessName, active: company?.active ?? true }),
+        method: company ? 'PUT' : 'POST', body: JSON.stringify({ name: normalizedName, businessName: businessName.trim(), active: company?.active ?? true }),
       }); onSaved();
     } catch (caught) { setError(message(caught)); } finally { setSaving(false); }
   };
-  return <Modal title={company ? 'Editar empresa' : 'Nueva empresa'} onClose={onClose}><form onSubmit={submit} className="form-grid"><Field label="Nombre de la empresa *"><input autoFocus required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Razón social"><input maxLength={240} value={businessName} onChange={(event) => setBusinessName(event.target.value)} /></Field>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary" disabled={saving}>{saving ? 'Guardando…' : 'Guardar empresa'}</button></div></form></Modal>;
+  return <Modal title={company ? 'Editar empresa' : 'Nueva empresa'} onClose={onClose}><form onSubmit={submit} className="form-grid"><Field label="Nombre de la empresa *"><input autoFocus maxLength={160} aria-required="true" aria-invalid={Boolean(nameError)} aria-describedby={nameError ? 'company-name-error' : undefined} value={name} onChange={(event) => { setName(event.target.value); if (nameError) setNameError(''); }} />{nameError && <small id="company-name-error" className="field-error">{nameError}</small>}</Field><Field label="Razón social"><input maxLength={240} value={businessName} onChange={(event) => setBusinessName(event.target.value)} /></Field>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" onClick={onClose}>Cancelar</button><button className="primary" disabled={saving}>{saving ? 'Guardando…' : 'Guardar empresa'}</button></div></form></Modal>;
 }
 
 function LocationsView({ notify }: { notify: Notify }) {
   const [companies, setCompanies] = useState<Company[]>([]);
-  const [selectedId, setSelectedId] = useState('');
-  useEffect(() => { api<{ companies: Company[] }>('/api/companies').then((result) => { setCompanies(result.companies); if (!selectedId && result.companies[0]) setSelectedId(result.companies[0].id); }).catch((error) => notify('error', message(error))); }, []);
+  const [selectedId, setSelectedId] = useState(() => window.sessionStorage.getItem(LOCATION_COMPANY_SESSION_KEY) ?? '');
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [editing, setEditing] = useState<Company | 'new' | null>(null);
+  const loadCompanies = useCallback(async (preferredId?: string) => {
+    setLoading(true); setLoadError('');
+    try {
+      const result = await api<{ companies: Company[] }>('/api/companies');
+      setCompanies(result.companies);
+      setSelectedId((currentId) => {
+        const requestedId = preferredId ?? currentId ?? window.sessionStorage.getItem(LOCATION_COMPANY_SESSION_KEY) ?? '';
+        const requested = result.companies.find((item) => item.id === requestedId);
+        const next = requested ?? result.companies.find((item) => item.active) ?? result.companies[0];
+        return next?.id ?? '';
+      });
+    } catch (error) {
+      const text = message(error);
+      setLoadError(text);
+      notify('error', text);
+    } finally { setLoading(false); }
+  }, [notify]);
+  useEffect(() => { void loadCompanies(); }, [loadCompanies]);
+  useEffect(() => {
+    if (selectedId) window.sessionStorage.setItem(LOCATION_COMPANY_SESSION_KEY, selectedId);
+    else window.sessionStorage.removeItem(LOCATION_COMPANY_SESSION_KEY);
+  }, [selectedId]);
+
   const company = companies.find((item) => item.id === selectedId);
-  return <section><div className="section-heading"><div><h2>Catálogo de ubicaciones</h2><p>Selecciona una empresa para administrar equipos y dispositivos.</p></div><select className="company-select" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>{companies.map((item) => <option key={item.id} value={item.id}>{item.name}{item.active ? '' : ' (inactiva)'}</option>)}</select></div>{company ? <CompanyDetail company={company} locationsOnly notify={notify} /> : <Empty text="Primero crea una empresa." />}</section>;
+  const normalizedSearch = normalizeSearch(search);
+  const visibleCompanies = companies.filter((item) => normalizeSearch([
+    item.name, item.businessName, item.active ? 'activa activo' : 'inactiva inactivo',
+    `${item.activeBranches ?? 0} sucursales`, `${item.activeLocations ?? 0} ubicaciones`,
+  ].join(' ')).includes(normalizedSearch));
+
+  return <section>
+    <div className="section-heading"><div><h2>Catálogo de ubicaciones</h2><p>Busca una empresa y administra sus equipos y dispositivos sin perder el contexto.</p></div><button className="primary" onClick={() => setEditing('new')}>+ Nueva empresa</button></div>
+    <div className="locations-workspace">
+      <aside className="company-navigator card" aria-label="Selector de empresa">
+        <div className="company-navigator-heading"><div><span className="eyebrow">Empresas</span><h3>Selecciona una empresa</h3></div><span className="count-pill">{visibleCompanies.length}</span></div>
+        <div className="company-search">
+          <span aria-hidden="true">⌕</span>
+          <label className="visually-hidden" htmlFor="location-company-search">Buscar empresa</label>
+          <input id="location-company-search" placeholder="Buscar empresa por nombre o razón social" value={search} onChange={(event) => setSearch(event.target.value)} />
+          {search && <button type="button" aria-label="Limpiar búsqueda de empresas" title="Limpiar búsqueda" onClick={() => setSearch('')}>×</button>}
+        </div>
+        {loading ? <LoadingText text="Cargando empresas…" /> : loadError ? <div className="company-load-state" role="alert"><p>No se pudieron cargar las empresas.</p><small>{loadError}</small><button onClick={() => void loadCompanies()}>Reintentar</button></div> : visibleCompanies.length === 0 ? <div className="company-load-state"><p>{companies.length ? 'No se encontraron empresas con esa búsqueda.' : 'Todavía no hay empresas registradas.'}</p>{!companies.length && <button onClick={() => setEditing('new')}>Crear empresa</button>}</div> : <div className="company-strip-list" role="listbox" aria-label="Empresas disponibles">
+          {visibleCompanies.map((item) => {
+            const selected = item.id === selectedId;
+            return <button key={item.id} type="button" role="option" aria-selected={selected} className={`company-strip${selected ? ' selected' : ''}`} onClick={() => setSelectedId(item.id)}>
+              <i className="company-strip-indicator" aria-hidden="true" />
+              <span className="company-strip-icon" aria-hidden="true">{item.name.trim().charAt(0).toUpperCase() || 'E'}</span>
+              <span className="company-strip-copy"><strong>{item.name}</strong><small>{item.businessName || 'Sin razón social registrada'}</small><span><Status active={item.active} /><em>{item.activeBranches ?? 0} suc. · {item.activeLocations ?? 0} ubic.</em></span></span>
+              <span className="company-strip-check" aria-hidden="true">{selected ? '✓' : '›'}</span>
+            </button>;
+          })}
+        </div>}
+      </aside>
+      <div className="locations-company-detail">
+        {company ? <CompanyDetail company={company} locationsOnly notify={notify} onEditCompany={() => setEditing(company)} /> : !loading && !loadError && <div className="card company-selection-empty"><strong>Selecciona una empresa</strong><p>Elige una empresa de la lista para consultar y administrar sus ubicaciones.</p></div>}
+      </div>
+    </div>
+    {editing && <CompanyModal company={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={async () => {
+      const editedId = editing === 'new' ? undefined : editing.id;
+      setEditing(null);
+      notify('success', 'Empresa guardada correctamente.');
+      await loadCompanies(editedId);
+    }} />}
+  </section>;
 }
 
-function CompanyDetail({ company, onBack, notify, locationsOnly = false }: { company: Company; onBack?: () => void; notify: Notify; locationsOnly?: boolean }) {
+function CompanyDetail({ company, onBack, notify, locationsOnly = false, onEditCompany }: { company: Company; onBack?: () => void; notify: Notify; locationsOnly?: boolean; onEditCompany?: () => void }) {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [refresh, setRefresh] = useState(0);
-  const loadBranches = useCallback(() => api<{ branches: Branch[] }>(`/api/companies/${company.id}/branches`).then((result) => setBranches(result.branches)).catch((error) => notify('error', message(error))), [company.id]);
+  const [branchesLoading, setBranchesLoading] = useState(true);
+  const loadBranches = useCallback(async () => {
+    setBranchesLoading(true);
+    try {
+      const result = await api<{ branches: Branch[] }>(`/api/companies/${company.id}/branches`);
+      setBranches(result.branches);
+    } catch (error) { notify('error', message(error)); }
+    finally { setBranchesLoading(false); }
+  }, [company.id, notify]);
   useEffect(() => { void loadBranches(); }, [loadBranches, refresh]);
-  return <div className="detail-stack">{!locationsOnly && <button className="back-button" onClick={onBack}>← Volver a empresas</button>}<div className="company-hero card"><div><span className="eyebrow">Empresa</span><h2>{company.name}</h2><p>{company.businessName || 'Sin razón social registrada'}</p></div><Status active={company.active} /></div>{!locationsOnly && <BranchManager company={company} branches={branches} notify={notify} onChanged={() => setRefresh((value) => value + 1)} />}<div className="location-columns">{(['extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'] as EquipmentType[]).map((type) => <LocationSection key={type} company={company} branches={branches} type={type} notify={notify} refresh={refresh} />)}</div></div>;
+  return <div className="detail-stack">{!locationsOnly && <button className="back-button" onClick={onBack}>← Volver a empresas</button>}<div className="company-hero card"><div className="company-hero-copy"><span className="eyebrow">Empresa seleccionada</span><h2>{company.name}</h2><p>{company.businessName || 'Sin razón social registrada'}</p><div className="company-hero-meta"><Status active={company.active} /><span>{company.activeBranches ?? branches.filter((item) => item.active).length} sucursales activas</span><span>{company.activeLocations ?? 0} ubicaciones activas</span></div></div><div className="company-hero-actions">{onEditCompany && <button onClick={onEditCompany}>Editar empresa</button>}</div></div>{!locationsOnly && <BranchManager company={company} branches={branches} notify={notify} onChanged={() => setRefresh((value) => value + 1)} />}<div className="location-columns">{(['extinguisher', 'hydrant', 'addressed_device', 'conventional_device', 'notification_device'] as EquipmentType[]).map((type) => <LocationSection key={type} company={company} branches={branches} branchesLoading={branchesLoading} type={type} notify={notify} refresh={refresh} />)}</div></div>;
 }
 
 function BranchManager({ company, branches, notify, onChanged }: { company: Company; branches: Branch[]; notify: Notify; onChanged: () => void }) {
@@ -271,21 +352,28 @@ function BranchManager({ company, branches, notify, onChanged }: { company: Comp
   return <div className="card block"><div className="block-title"><div><h3>Sucursales</h3><p>Son opcionales; también puedes registrar ubicaciones directamente en la empresa.</p></div><button onClick={() => setEditing('new')}>+ Agregar sucursal</button></div><div className="chip-list">{branches.length ? branches.map((branch) => <div className="branch-chip" key={branch.id}><div><strong>{branch.name}</strong><small>{branch.address || 'Sin dirección'}</small></div><Status active={branch.active} /><button onClick={() => setEditing(branch)}>Editar</button><button onClick={() => void toggle(branch)}>{branch.active ? 'Desactivar' : 'Reactivar'}</button></div>) : <p className="muted">No hay sucursales. Puedes continuar sin crear una.</p>}</div>{editing && <SimpleEditor title={editing === 'new' ? 'Nueva sucursal' : 'Editar sucursal'} firstLabel="Nombre *" secondLabel="Dirección" initial={editing === 'new' ? { name: '', detail: '' } : { name: editing.name, detail: editing.address }} onClose={() => setEditing(null)} onSave={(value) => save({ name: value.name, address: value.detail })} />}</div>;
 }
 
-function LocationSection({ company, branches, type, notify, refresh }: { company: Company; branches: Branch[]; type: EquipmentType; notify: Notify; refresh: number }) {
+function LocationSection({ company, branches, branchesLoading, type, notify, refresh }: { company: Company; branches: Branch[]; branchesLoading: boolean; type: EquipmentType; notify: Notify; refresh: number }) {
   const [locations, setLocations] = useState<Location[]>([]);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('all');
   const [branchId, setBranchId] = useState('all');
   const [editing, setEditing] = useState<Location | 'new' | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const load = useCallback(async () => {
-    try { const result = await api<{ locations: Location[] }>(`/api/companies/${company.id}/locations${query({ equipmentType: type, search: search || undefined, active: status === 'all' ? undefined : status, branchId: branchId === 'all' ? undefined : branchId })}`); setLocations(result.locations); } catch (error) { notify('error', message(error)); }
-  }, [company.id, type, search, status, branchId, refresh]);
+    setLoading(true); setLoadError('');
+    try { const result = await api<{ locations: Location[] }>(`/api/companies/${company.id}/locations${query({ equipmentType: type, search: search || undefined, active: status === 'all' ? undefined : status, branchId: branchId === 'all' ? undefined : branchId })}`); setLocations(result.locations); } catch (error) { const text = message(error); setLoadError(text); notify('error', text); } finally { setLoading(false); }
+  }, [company.id, type, search, status, branchId, refresh, notify]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (branchId !== 'all' && branchId !== 'none' && !branches.some((branch) => branch.id === branchId)) setBranchId('all');
+  }, [branchId, branches]);
   const toggle = async (location: Location) => {
     if (location.active && !window.confirm('¿Estás seguro de que quieres desactivar esta ubicación?\nNo aparecerá para nuevas inspecciones, pero seguirá visible en reportes anteriores.')) return;
     try { await api(`/api/locations/${location.id}/status`, { method: 'PATCH', body: JSON.stringify({ active: !location.active }) }); notify('success', location.active ? 'Ubicación desactivada.' : 'Ubicación reactivada.'); await load(); } catch (error) { notify('error', message(error)); }
   };
-  return <div className="card block location-block"><div className="block-title"><div><span className={`equipment-dot ${type}`} /><h3>{equipmentLabel(type)}</h3></div><button onClick={() => setEditing('new')}>+ Agregar</button></div><div className="mini-filters"><input aria-label={`Buscar ubicaciones de ${type}`} placeholder="Buscar ubicación" value={search} onChange={(event) => setSearch(event.target.value)} /><select aria-label="Filtrar por sucursal" value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="all">Todas las sucursales</option><option value="none">Sin sucursal</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select><select aria-label="Filtrar ubicaciones por estado" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Todos</option><option value="true">Activas</option><option value="false">Inactivas</option></select></div><div className="location-list">{locations.length ? locations.map((location) => <article key={location.id} className="location-item"><div><strong>{location.name}</strong><small>{[location.branchName, location.area, location.floor && `Piso ${location.floor}`].filter(Boolean).join(' · ') || 'Directa en empresa'}</small><span>{location.reference}</span></div><Status active={location.active} /><div className="actions"><button onClick={() => setEditing(location)}>Editar</button><button className={location.active ? 'danger-text' : ''} onClick={() => void toggle(location)}>{location.active ? 'Desactivar' : 'Reactivar'}</button></div></article>) : <Empty text="No hay ubicaciones con estos filtros." />}</div>{editing && <LocationModal company={company} branches={branches} type={type} location={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify('success', 'Ubicación guardada.'); await load(); }} />}</div>;
+  const branchFilter = branchesLoading ? <select aria-label="Cargando sucursales" disabled><option>Cargando sucursales…</option></select> : branches.length ? <select aria-label="Filtrar por sucursal" value={branchId} onChange={(event) => setBranchId(event.target.value)}><option value="all">Todas las sucursales</option><option value="none">Directa en empresa</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.name}</option>)}</select> : <select aria-label="Sin sucursales disponibles" disabled><option>Directa en empresa</option></select>;
+  return <div className="card block location-block"><div className="block-title"><div><span className={`equipment-dot ${type}`} /><h3>{equipmentLabel(type)}</h3></div><button onClick={() => setEditing('new')}>+ Agregar</button></div><div className="mini-filters"><input aria-label={`Buscar ubicaciones de ${type}`} placeholder="Buscar ubicación" value={search} onChange={(event) => setSearch(event.target.value)} />{branchFilter}<select aria-label="Filtrar ubicaciones por estado" value={status} onChange={(event) => setStatus(event.target.value)}><option value="all">Todos</option><option value="true">Activas</option><option value="false">Inactivas</option></select></div><div className="location-list">{loading ? <LoadingText text="Cargando ubicaciones…" /> : loadError ? <div className="location-load-error" role="alert"><span>No se pudieron cargar las ubicaciones.</span><button onClick={() => void load()}>Reintentar</button></div> : locations.length ? locations.map((location) => <article key={location.id} className="location-item"><div><strong>{location.name}</strong><small>{[location.branchName, location.area, location.floor && `Piso ${location.floor}`].filter(Boolean).join(' · ') || 'Directa en empresa'}</small><span>{location.reference}</span></div><Status active={location.active} /><div className="actions"><button onClick={() => setEditing(location)}>Editar</button><button className={location.active ? 'danger-text' : ''} onClick={() => void toggle(location)}>{location.active ? 'Desactivar' : 'Reactivar'}</button></div></article>) : <Empty text="No hay ubicaciones con estos filtros." />}</div>{editing && <LocationModal company={company} branches={branches} type={type} location={editing === 'new' ? null : editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify('success', 'Ubicación guardada.'); await load(); }} />}</div>;
 }
 
 function LocationModal({ company, branches, type, location, onClose, onSaved }: { company: Company; branches: Branch[]; type: EquipmentType; location: Location | null; onClose: () => void; onSaved: () => void }) {
@@ -356,6 +444,7 @@ function EvidenceSummary({ report }: { report: Report }) {
 }
 function Status({ active }: { active: boolean }) { return <span className={active ? 'status active' : 'status inactive'}><i />{active ? 'Activa' : 'Inactiva'}</span>; }
 function Loading() { return <div className="loading"><span /> Cargando información…</div>; }
+function LoadingText({ text }: { text: string }) { return <div className="loading compact" role="status"><span /> {text}</div>; }
 function Empty({ text }: { text: string }) { return <div className="empty">{text}</div>; }
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
 
@@ -364,6 +453,7 @@ function SimpleEditor({ title, firstLabel, secondLabel, initial, onClose, onSave
 
 type Notify = (kind: 'success' | 'error', text: string) => void;
 function message(error: unknown) { return error instanceof Error ? error.message : 'Ocurrió un error inesperado.'; }
+function normalizeSearch(value: string) { return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('es-MX').replace(/\s+/g, ' ').trim(); }
 function viewTitle(view: View) { return ({ companies: 'Empresas', locations: 'Ubicaciones', reports: 'Reportes', maintenance: 'Mantenimiento' } as const)[view]; }
 function displayDate(value: string) { const [year, month, day] = value.split('-'); return year && month && day ? `${day}/${month}/${year}` : value; }
 function displayDateTime(value: string) { return new Intl.DateTimeFormat('es-MX', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)); }

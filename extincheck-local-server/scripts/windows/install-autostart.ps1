@@ -37,6 +37,12 @@ Register-ScheduledTask `
   -Action $action `
   -Trigger $trigger `
   -Settings $settings `
-  -Principal $principal | Out-Null
+  -Principal $principal `
+  -ErrorAction Stop | Out-Null
 
-Write-Host "Tarea '$TaskName' instalada. Revísala en el Programador de tareas antes de reiniciar."
+$registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+if ($registered.Principal.UserId -ne 'SYSTEM') {
+  throw "La tarea '$TaskName' no quedó registrada con la cuenta SYSTEM."
+}
+
+Write-Host "Tarea '$TaskName' instalada y verificada. Revísala en el Programador de tareas antes de reiniciar."
