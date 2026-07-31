@@ -17,6 +17,7 @@ import { getCatalogStatus, syncCatalog } from '../../services/catalog-sync';
 import { CatalogStatus } from '../../types/catalog.types';
 import {
   LocalServerDiagnostics,
+  localServerErrorAlert,
   runLocalServerDiagnostics,
 } from '../../services/local-server-api';
 
@@ -60,10 +61,8 @@ export default function SettingsScreen() {
     } catch (error) {
       console.error('[settings] Catalog sync failed:', error);
       setCatalogStatus(await getCatalogStatus().catch(() => catalogStatus));
-      Alert.alert(
-        'Servidor no disponible',
-        'No se encontró el servidor local.\nPuedes continuar usando el último catálogo guardado en el dispositivo.'
-      );
+      const alert = localServerErrorAlert(error);
+      Alert.alert(alert.title, alert.message);
     } finally {
       setIsSyncingCatalog(false);
     }

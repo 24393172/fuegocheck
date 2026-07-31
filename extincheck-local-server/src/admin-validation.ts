@@ -24,15 +24,36 @@ export const equipmentTypeSchema = z.enum([
   'notification_device',
 ]);
 
-export const locationInputSchema = z.object({
+const standardEquipmentTypeSchema = z.enum([
+  'hydrant',
+  'addressed_device',
+  'conventional_device',
+  'notification_device',
+]);
+
+const extinguisherLocationInputSchema = z.object({
+  equipmentType: z.literal('extinguisher'),
+  name: requiredName,
+  identifier: z.string().trim().max(160).default(''),
+  extinguisherType: z.string().trim().max(160).default(''),
+  capacity: z.string().trim().max(160).default(''),
+  active: z.boolean().default(true),
+}).strict();
+
+const standardLocationInputSchema = z.object({
   branchId: uuidSchema.nullable().default(null),
-  equipmentType: equipmentTypeSchema,
+  equipmentType: standardEquipmentTypeSchema,
   name: requiredName,
   area: optionalText,
   floor: z.string().trim().max(120).default(''),
   reference: optionalText,
   active: z.boolean().default(true),
 }).strict();
+
+export const locationInputSchema = z.discriminatedUnion('equipmentType', [
+  extinguisherLocationInputSchema,
+  standardLocationInputSchema,
+]);
 
 export const statusInputSchema = z.object({ active: z.boolean() }).strict();
 

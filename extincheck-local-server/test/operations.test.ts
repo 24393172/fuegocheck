@@ -132,7 +132,7 @@ test('backup is consistent, portable, excludes sessions and detects tampering', 
     const backup = await fixture.service.createBackup({ label: 'pilot' });
     const root = path.join(fixture.layout.backups, backup.id);
     assert.ok(fs.existsSync(path.join(root, 'manifest.json')));
-    assert.equal(backup.schemaVersion, 2);
+    assert.equal(backup.schemaVersion, 3);
     assert.equal(backup.backupVersion, 1);
     assert.equal(backup.status, 'valid');
     assert.equal(backup.databaseIntegrity.integrityCheck, 'ok');

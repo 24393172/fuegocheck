@@ -309,6 +309,27 @@ export class LocalDatabase {
     applyOrderedMigrations(this.database, [
       { version: 1, name: 'baseline-local-schema', up: () => undefined },
       { version: 2, name: 'portable-storage-paths', up: () => undefined },
+      {
+        version: 3,
+        name: 'configured-extinguisher-identity',
+        up: () => {
+          const table = this.database.prepare(
+            `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'equipment_locations'`
+          ).get();
+          if (!table) return;
+          const columns = new Set(
+            (this.database.prepare('PRAGMA table_info(equipment_locations)').all() as Array<{ name: string }>)
+              .map((column) => column.name)
+          );
+          for (const column of ['identifier', 'extinguisher_type', 'capacity']) {
+            if (!columns.has(column)) {
+              this.database.exec(
+                `ALTER TABLE equipment_locations ADD COLUMN ${column} TEXT NOT NULL DEFAULT '';`
+              );
+            }
+          }
+        },
+      },
     ]);
   }
 

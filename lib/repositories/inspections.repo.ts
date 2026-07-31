@@ -3,6 +3,12 @@ import { generateId } from '../uuid';
 import { Inspection, InspectionListItem, InspectionStatus, SyncStatus } from '../../types/inspection.types';
 import { deleteAllPhotosForInspection } from '../photo-manager';
 import { deleteAttachmentFilesForInspection } from '../attachment-files';
+import {
+  MAX_EXTINGUISHERS,
+  createConfiguredExtinguisher,
+  normalizeExtinguisherCollection,
+} from '../extinguishers';
+import { ExtinguisherRecord } from '../../types/extinguisher.types';
 
 type CreateInspectionInput = Omit<
   Inspection,
@@ -153,6 +159,104 @@ export async function updateInspection(
   const values = [...Object.values(updates), id];
 
   await db.runAsync(`UPDATE inspections SET ${columns} WHERE id = ?`, values);
+}
+
+export async function saveConfiguredExtinguisher(
+  inspectionId: string,
+  values: ExtinguisherRecord
+): Promise<void> {
+  const database = getDatabase();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    const inspection = await transaction.getFirstAsync<InspectionRow>(
+      'SELECT * FROM inspections WHERE id = ?',
+      [inspectionId]
+    );
+    if (!inspection) throw new Error('INSPECTION_NOT_FOUND');
+    if (['completed', 'mail_composer_opened', 'sent'].includes(inspection.status)) {
+      throw new Error('INSPECTION_LOCKED');
+    }
+
+    let formData: Record<string, unknown>;
+    try {
+      formData = JSON.parse(inspection.form_data) as Record<string, unknown>;
+    } catch {
+      throw new Error('INSPECTION_DATA_INVALID');
+    }
+    const site = ((formData.site && typeof formData.site === 'object')
+      ? formData.site
+      : formData) as Record<string, unknown>;
+    const companyId = typeof site.companyId === 'string' ? site.companyId : '';
+    const equipment = await transaction.getFirstAsync<{
+      id: string;
+      identifier: string;
+      name: string;
+      extinguisherType: string;
+      capacity: string;
+    }>(
+      `SELECT id, identifier, name, extinguisher_type AS extinguisherType, capacity
+       FROM catalog_locations
+       WHERE id = ? AND company_id = ? AND equipment_type = 'extinguisher' AND active = 1`,
+      [values.id, companyId]
+    );
+    if (!equipment) throw new Error('CONFIGURED_EXTINGUISHER_NOT_FOUND');
+
+    const pumps = (formData.pumps ?? {}) as Record<string, unknown>;
+    const normalized = normalizeExtinguisherCollection(pumps.extintores);
+    const existingIndex = normalized.collection.items.findIndex((item) => item.id === equipment.id);
+    const duplicateIndex = normalized.collection.items.findIndex(
+      (item, index) => index !== existingIndex
+        && (item.id === equipment.id || item.locationId === equipment.id)
+    );
+    if (duplicateIndex >= 0) {
+      throw new Error('EXTINGUISHER_ALREADY_CAPTURED');
+    }
+    if (existingIndex < 0 && normalized.collection.items.length >= MAX_EXTINGUISHERS) {
+      throw new Error('EXTINGUISHER_LIMIT_REACHED');
+    }
+
+    const nextRecord = createConfiguredExtinguisher({
+      id: equipment.id,
+      numero: equipment.identifier,
+      ubicacion: equipment.name,
+      tipo_extintor: equipment.extinguisherType,
+      capacidad: equipment.capacity,
+    }, existingIndex >= 0 ? normalized.collection.items[existingIndex] : undefined);
+    const inspectionValues: ExtinguisherRecord = {
+      ...nextRecord,
+      proxima_recarga: values.proxima_recarga,
+      presion: values.presion,
+      presion_comentario: values.presion_comentario,
+      altura: values.altura,
+      altura_comentario: values.altura_comentario,
+      seguro: values.seguro,
+      seguro_comentario: values.seguro_comentario,
+      pintura: values.pintura,
+      pintura_comentario: values.pintura_comentario,
+      manguera: values.manguera,
+      manguera_comentario: values.manguera_comentario,
+      difusor: values.difusor,
+      difusor_comentario: values.difusor_comentario,
+      senalamiento: values.senalamiento,
+      senalamiento_comentario: values.senalamiento_comentario,
+      observaciones: values.observaciones,
+      updatedAt: Date.now(),
+    };
+    const nextItems = [...normalized.collection.items];
+    if (existingIndex >= 0) nextItems[existingIndex] = inspectionValues;
+    else nextItems.push(inspectionValues);
+    const nextFormData = JSON.stringify({
+      ...formData,
+      pumps: { ...pumps, extintores: { items: nextItems } },
+    });
+    const now = Date.now();
+    await transaction.runAsync(
+      `UPDATE inspections SET form_data = ?, updated_at = ?, sync_status = 'pending',
+       synced_at = NULL, sync_error = NULL, synced_format_ids = '[]',
+       official_report_id = NULL, official_report_filename = NULL,
+       official_report_download_url = NULL WHERE id = ?`,
+      [nextFormData, now, inspectionId]
+    );
+  });
 }
 
 export async function updateStatus(id: string, status: InspectionStatus, pendingComment?: string): Promise<void> {

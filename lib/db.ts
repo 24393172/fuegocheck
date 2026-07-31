@@ -112,6 +112,9 @@ export async function initializeDatabase(): Promise<void> {
       area TEXT NOT NULL DEFAULT '',
       floor TEXT NOT NULL DEFAULT '',
       reference TEXT NOT NULL DEFAULT '',
+      identifier TEXT NOT NULL DEFAULT '',
+      extinguisher_type TEXT NOT NULL DEFAULT '',
+      capacity TEXT NOT NULL DEFAULT '',
       active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
       server_updated_at TEXT NOT NULL,
       synced_at INTEGER NOT NULL
@@ -191,6 +194,18 @@ export async function initializeDatabase(): Promise<void> {
             ON catalog_locations(branch_id, equipment_type, active, name);
         `);
       });
+    }
+  }
+
+  const catalogLocationColumns = await database.getAllAsync<{ name: string }>(
+    'PRAGMA table_info(catalog_locations)'
+  );
+  const catalogLocationColumnNames = new Set(catalogLocationColumns.map((column) => column.name));
+  for (const column of ['identifier', 'extinguisher_type', 'capacity'] as const) {
+    if (!catalogLocationColumnNames.has(column)) {
+      await database.execAsync(
+        `ALTER TABLE catalog_locations ADD COLUMN ${column} TEXT NOT NULL DEFAULT '';`
+      );
     }
   }
 

@@ -29,6 +29,14 @@ export interface ExtinguisherRecord {
   updatedAt: number;
 }
 
+export interface ConfiguredExtinguisher {
+  id: string;
+  numero: string;
+  ubicacion: string;
+  tipo_extintor: string;
+  capacidad: string;
+}
+
 export interface ExtinguisherCollection {
   items: ExtinguisherRecord[];
 }

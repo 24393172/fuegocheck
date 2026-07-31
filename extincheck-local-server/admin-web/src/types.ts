@@ -22,18 +22,31 @@ export type EquipmentType =
   | 'conventional_device'
   | 'notification_device';
 
-export interface Location {
+interface BaseLocation {
   id: string;
   companyId: string;
-  branchId: string | null;
-  branchName: string | null;
   equipmentType: EquipmentType;
   name: string;
+  active: boolean;
+}
+
+export interface ExtinguisherLocation extends BaseLocation {
+  equipmentType: 'extinguisher';
+  identifier: string;
+  extinguisherType: string;
+  capacity: string;
+}
+
+export interface StandardLocation extends BaseLocation {
+  equipmentType: Exclude<EquipmentType, 'extinguisher'>;
+  branchId: string | null;
+  branchName: string | null;
   area: string;
   floor: string;
   reference: string;
-  active: boolean;
 }
+
+export type Location = ExtinguisherLocation | StandardLocation;
 
 export interface Report {
   id: string;

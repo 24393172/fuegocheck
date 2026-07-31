@@ -22,6 +22,7 @@ import { ALARM_FORMAT_ID, normalizeAlarmsData } from '../../lib/alarms';
 import { ANSUL_FORMAT_ID, normalizeAnsulData } from '../../lib/ansul';
 import { ansulR102Form, tableroAdForm } from '../../schemas';
 import { FirePumpFormId } from '../../types/fire-pump.types';
+import { localServerErrorAlert } from '../../services/local-server-api';
 
 type Step = 'template' | 'client';
 
@@ -187,10 +188,8 @@ export default function NewInspectionScreen() {
       );
     } catch (error) {
       console.error('[new] Catalog sync failed:', error);
-      Alert.alert(
-        'Servidor no disponible',
-        'No se encontró el servidor local.\nPuedes continuar usando el último catálogo guardado en el dispositivo.'
-      );
+      const alert = localServerErrorAlert(error);
+      Alert.alert(alert.title, alert.message);
     } finally {
       setIsSyncingCatalog(false);
     }

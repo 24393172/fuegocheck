@@ -24,19 +24,32 @@ export interface CatalogBranch {
   syncedAt: number;
 }
 
-export interface CatalogLocation {
+interface CatalogLocationBase {
   id: string;
   companyId: string;
-  branchId: string | null;
   equipmentType: CatalogEquipmentType;
   name: string;
-  area: string;
-  floor: string;
-  reference: string;
   active: boolean;
   serverUpdatedAt: string;
   syncedAt: number;
 }
+
+export interface CatalogExtinguisherLocation extends CatalogLocationBase {
+  equipmentType: 'extinguisher';
+  identifier: string;
+  extinguisherType: string;
+  capacity: string;
+}
+
+export interface CatalogStandardLocation extends CatalogLocationBase {
+  equipmentType: Exclude<CatalogEquipmentType, 'extinguisher'>;
+  branchId: string | null;
+  area: string;
+  floor: string;
+  reference: string;
+}
+
+export type CatalogLocation = CatalogExtinguisherLocation | CatalogStandardLocation;
 
 export interface CatalogStatus {
   version: string | null;

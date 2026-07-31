@@ -10,10 +10,17 @@ import {
 } from '../types/catalog.types';
 
 const shortText = z.string().trim().max(300);
-const locationSchema = z.object({
+const extinguisherLocationSchema = z.object({
+  id: z.uuid(),
+  equipmentType: z.literal('extinguisher'),
+  name: z.string().trim().min(1).max(160),
+  identifier: z.string().trim().max(160).default(''),
+  extinguisherType: z.string().trim().max(160).default(''),
+  capacity: z.string().trim().max(160).default(''),
+}).strip();
+const standardLocationSchema = z.object({
   id: z.uuid(),
   equipmentType: z.enum([
-    'extinguisher',
     'hydrant',
     'addressed_device',
     'conventional_device',
@@ -25,6 +32,10 @@ const locationSchema = z.object({
   floor: shortText.default(''),
   reference: z.string().trim().max(500).default(''),
 }).strict();
+const locationSchema = z.discriminatedUnion('equipmentType', [
+  extinguisherLocationSchema,
+  standardLocationSchema,
+]);
 const branchSchema = z.object({
   id: z.uuid(),
   name: z.string().trim().min(1).max(160),
@@ -93,11 +104,13 @@ export async function syncCatalog(): Promise<CatalogStatus> {
         );
       }
       for (const location of company.locations) {
+        const isExtinguisher = location.equipmentType === 'extinguisher';
         await transaction.runAsync(
           `INSERT INTO catalog_locations
             (id, company_id, branch_id, equipment_type, name, area, floor, reference,
-             active, server_updated_at, synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+             identifier, extinguisher_type, capacity,
+              active, server_updated_at, synced_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              company_id = excluded.company_id,
              branch_id = excluded.branch_id,
@@ -105,13 +118,22 @@ export async function syncCatalog(): Promise<CatalogStatus> {
              name = excluded.name,
              area = excluded.area,
              floor = excluded.floor,
-             reference = excluded.reference,
+              reference = excluded.reference,
+              identifier = excluded.identifier,
+              extinguisher_type = excluded.extinguisher_type,
+              capacity = excluded.capacity,
              active = 1,
              server_updated_at = excluded.server_updated_at,
              synced_at = excluded.synced_at`,
           [
-            location.id, company.id, location.branchId, location.equipmentType,
-            location.name, location.area, location.floor, location.reference,
+            location.id, company.id, isExtinguisher ? null : location.branchId, location.equipmentType,
+            location.name,
+            isExtinguisher ? '' : location.area,
+            isExtinguisher ? '' : location.floor,
+            isExtinguisher ? '' : location.reference,
+            isExtinguisher ? location.identifier : '',
+            isExtinguisher ? location.extinguisherType : '',
+            isExtinguisher ? location.capacity : '',
             catalog.generatedAt, syncedAt,
           ]
         );
@@ -154,13 +176,14 @@ export function getBranchesByCompany(companyId: string): Promise<CatalogBranch[]
   );
 }
 
-export function getLocationsByCompany(
+export function getLocationsByCompany<T extends CatalogEquipmentType>(
   companyId: string,
-  equipmentType: CatalogEquipmentType
-): Promise<CatalogLocation[]> {
-  return getDatabase().getAllAsync<CatalogLocation>(
+  equipmentType: T
+): Promise<Array<Extract<CatalogLocation, { equipmentType: T }>>> {
+  return getDatabase().getAllAsync<Extract<CatalogLocation, { equipmentType: T }>>(
     `SELECT id, company_id AS companyId, branch_id AS branchId,
-            equipment_type AS equipmentType, name, area, floor, reference,
+             equipment_type AS equipmentType, name, area, floor, reference,
+             identifier, extinguisher_type AS extinguisherType, capacity,
             active = 1 AS active, server_updated_at AS serverUpdatedAt, synced_at AS syncedAt
      FROM catalog_locations
      WHERE company_id = ? AND equipment_type = ? AND active = 1
@@ -169,18 +192,30 @@ export function getLocationsByCompany(
   );
 }
 
-export function getLocationsByBranch(
+export function getLocationsByBranch<T extends CatalogEquipmentType>(
   branchId: string,
-  equipmentType: CatalogEquipmentType
-): Promise<CatalogLocation[]> {
-  return getDatabase().getAllAsync<CatalogLocation>(
+  equipmentType: T
+): Promise<Array<Extract<CatalogLocation, { equipmentType: T }>>> {
+  return getDatabase().getAllAsync<Extract<CatalogLocation, { equipmentType: T }>>(
     `SELECT id, company_id AS companyId, branch_id AS branchId,
-            equipment_type AS equipmentType, name, area, floor, reference,
+             equipment_type AS equipmentType, name, area, floor, reference,
+             identifier, extinguisher_type AS extinguisherType, capacity,
             active = 1 AS active, server_updated_at AS serverUpdatedAt, synced_at AS syncedAt
      FROM catalog_locations
      WHERE branch_id = ? AND equipment_type = ? AND active = 1
      ORDER BY name COLLATE NOCASE`,
     [branchId, equipmentType]
+  );
+}
+
+export function getCatalogLocation(id: string): Promise<CatalogLocation | null> {
+  return getDatabase().getFirstAsync<CatalogLocation>(
+    `SELECT id, company_id AS companyId, branch_id AS branchId,
+            equipment_type AS equipmentType, name, area, floor, reference,
+            identifier, extinguisher_type AS extinguisherType, capacity,
+            active = 1 AS active, server_updated_at AS serverUpdatedAt, synced_at AS syncedAt
+     FROM catalog_locations WHERE id = ?`,
+    [id]
   );
 }
 
@@ -239,7 +274,9 @@ function validateCatalogRelations(catalog: ServerCatalog) {
     for (const location of company.locations) {
       if (entityIds.has(location.id)) throw new Error('El catálogo contiene ubicaciones duplicadas.');
       entityIds.add(location.id);
-      if (location.branchId && !branchIds.has(location.branchId)) {
+      if (location.equipmentType !== 'extinguisher'
+        && location.branchId
+        && !branchIds.has(location.branchId)) {
         throw new Error('Una ubicación referencia una sucursal inválida.');
       }
     }

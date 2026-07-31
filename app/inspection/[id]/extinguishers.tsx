@@ -1,8 +1,9 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Modal,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -12,15 +13,18 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   MAX_EXTINGUISHERS,
+  configuredExtinguisherProgress,
   isExtinguisherComplete,
   normalizeExtinguisherCollection,
 } from '../../../lib/extinguishers';
-import { parseFormData } from '../../../lib/form-data';
+import { getSiteData, parseFormData } from '../../../lib/form-data';
 import { getInspection, updateInspection } from '../../../lib/repositories/inspections.repo';
 import { getPhotosForItem, requestPhotoDeletion } from '../../../lib/repositories/photos.repo';
 import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { ExtinguisherCollection, ExtinguisherRecord } from '../../../types/extinguisher.types';
 import { Inspection } from '../../../types/inspection.types';
+import { CatalogExtinguisherLocation } from '../../../types/catalog.types';
+import { getLocationsByCompany } from '../../../services/catalog-sync';
 
 export default function ExtinguishersScreen() {
   const { id, readonly } = useLocalSearchParams<{ id: string; readonly?: string }>();
@@ -29,6 +33,9 @@ export default function ExtinguishersScreen() {
   const [collection, setCollection] = useState<ExtinguisherCollection>({ items: [] });
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [configured, setConfigured] = useState<CatalogExtinguisherLocation[]>([]);
+  const [selectorVisible, setSelectorVisible] = useState(false);
+  const [selectedConfiguredId, setSelectedConfiguredId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -53,6 +60,10 @@ export default function ExtinguishersScreen() {
 
       setInspection(current);
       setCollection(normalized.collection);
+      const site = getSiteData(current);
+      setConfigured(site.companyId
+        ? await getLocationsByCompany(site.companyId, 'extinguisher')
+        : []);
     } catch (error) {
       console.error('[extinguishers] Failed to load:', error);
       Alert.alert('Error', 'No se pudieron cargar los extintores.');
@@ -66,6 +77,15 @@ export default function ExtinguishersScreen() {
   }, [load]));
 
   const locked = readonly === '1' || inspection?.status === 'completed' || inspection?.status === 'mail_composer_opened' || inspection?.status === 'sent';
+  const progress = useMemo(
+    () => configuredExtinguisherProgress(configured, collection.items),
+    [configured, collection.items]
+  );
+  const capturedIds = progress.capturedIds;
+  const hasConfiguredCompany = Boolean(inspection && getSiteData(inspection).companyId);
+  const inspectedCount = hasConfiguredCompany ? progress.inspected : collection.items.length;
+  const totalConfigured = hasConfiguredCompany ? progress.total : collection.items.length;
+  const availableConfigured = progress.available;
 
   function openEditor(itemId: string) {
     router.push({
@@ -79,7 +99,23 @@ export default function ExtinguishersScreen() {
       Alert.alert('Límite alcanzado', `Esta plantilla admite un máximo de ${MAX_EXTINGUISHERS} extintores.`);
       return;
     }
-    openEditor('new');
+    if (availableConfigured.length === 0) {
+      Alert.alert(
+        configured.length === 0 ? 'Sin extintores configurados' : 'Plantilla completa',
+        configured.length === 0
+          ? 'Esta empresa no tiene extintores activos configurados en el panel administrativo.'
+          : 'Todos los extintores configurados para esta empresa ya fueron capturados.'
+      );
+      return;
+    }
+    setSelectedConfiguredId(null);
+    setSelectorVisible(true);
+  }
+
+  function continueWithSelected() {
+    if (!selectedConfiguredId || capturedIds.has(selectedConfiguredId)) return;
+    setSelectorVisible(false);
+    openEditor(selectedConfiguredId);
   }
 
   function confirmDelete(item: ExtinguisherRecord) {
@@ -147,14 +183,14 @@ export default function ExtinguishersScreen() {
           <View style={styles.headerCopy}>
             <Text style={styles.title}>Extintores capturados</Text>
             <Text style={styles.counter}>
-              {collection.items.length} de {MAX_EXTINGUISHERS}
+              {inspectedCount} de {totalConfigured}
             </Text>
           </View>
           {!locked && (
             <TouchableOpacity
               style={[
                 styles.addButton,
-                collection.items.length >= MAX_EXTINGUISHERS && styles.disabledButton,
+                availableConfigured.length === 0 && styles.disabledButton,
               ]}
               onPress={addExtinguisher}
               accessibilityRole="button"
@@ -174,6 +210,62 @@ export default function ExtinguishersScreen() {
           <Text style={styles.emptyTitle}>Aún no hay extintores</Text>
           <Text style={styles.emptyText}>Agrega el primer equipo para comenzar la inspección.</Text>
         </View>
+      )}
+      ListFooterComponent={(
+        <Modal
+          visible={selectorVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setSelectorVisible(false)}
+        >
+          <View style={styles.modalBackdrop}>
+            <View style={styles.selectorCard}>
+              <Text style={styles.selectorTitle}>Seleccionar extintor</Text>
+              <Text style={styles.selectorHelp}>Elige un equipo configurado para esta empresa.</Text>
+              <FlatList
+                data={configured}
+                keyExtractor={(item) => item.id}
+                style={styles.selectorList}
+                renderItem={({ item }) => {
+                  const captured = capturedIds.has(item.id);
+                  const selected = selectedConfiguredId === item.id;
+                  return (
+                    <TouchableOpacity
+                      style={[styles.selectorOption, selected && styles.selectedOption, captured && styles.capturedOption]}
+                      onPress={() => !captured && setSelectedConfiguredId(item.id)}
+                      disabled={captured}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected, disabled: captured }}
+                    >
+                      <View style={styles.selectorOptionBody}>
+                        <Text style={styles.selectorOptionTitle}>
+                          {item.identifier ? `Extintor ${item.identifier}` : 'Extintor sin identificador'}
+                        </Text>
+                        <Text style={styles.location}>{item.name}</Text>
+                        <Text style={styles.details}>
+                          {[item.extinguisherType, item.capacity].filter(Boolean).join(' · ') || 'Tipo y capacidad no configurados'}
+                        </Text>
+                      </View>
+                      {captured
+                        ? <Text style={styles.capturedLabel}>Capturado</Text>
+                        : <Ionicons name={selected ? 'radio-button-on' : 'radio-button-off'} size={22} color="#2563eb" />}
+                    </TouchableOpacity>
+                  );
+                }}
+              />
+              <View style={styles.modalActions}>
+                <TouchableOpacity style={styles.cancelButton} onPress={() => setSelectorVisible(false)}>
+                  <Text style={styles.cancelButtonText}>Cancelar</Text>
+                </TouchableOpacity>
+                {selectedConfiguredId && (
+                  <TouchableOpacity style={styles.continueButton} onPress={continueWithSelected}>
+                    <Text style={styles.continueButtonText}>Continuar</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
+          </View>
+        </Modal>
       )}
       renderItem={({ item }) => {
         const complete = isExtinguisherComplete(item);
@@ -253,4 +345,20 @@ const styles = StyleSheet.create({
   completeText: { color: '#15803d' },
   incompleteText: { color: '#b45309' },
   deleteButton: { width: 38, height: 42, alignItems: 'center', justifyContent: 'center' },
+  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(15, 23, 42, 0.45)' },
+  selectorCard: { maxHeight: '82%', padding: 18, paddingBottom: 26, borderTopLeftRadius: 20, borderTopRightRadius: 20, backgroundColor: '#ffffff', gap: 10 },
+  selectorTitle: { color: '#1f3f66', fontSize: 20, fontWeight: '800' },
+  selectorHelp: { color: '#64748b', fontSize: 13, lineHeight: 18 },
+  selectorList: { marginVertical: 4 },
+  selectorOption: { minHeight: 80, marginBottom: 8, padding: 12, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 12, backgroundColor: '#ffffff', flexDirection: 'row', alignItems: 'center', gap: 10 },
+  selectedOption: { borderColor: '#2563eb', backgroundColor: '#eff6ff' },
+  capturedOption: { opacity: 0.55, backgroundColor: '#f1f5f9' },
+  selectorOptionBody: { flex: 1, gap: 2 },
+  selectorOptionTitle: { color: '#1e293b', fontSize: 15, fontWeight: '800' },
+  capturedLabel: { color: '#475569', fontSize: 12, fontWeight: '800' },
+  modalActions: { flexDirection: 'row', gap: 10, paddingTop: 4 },
+  cancelButton: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 11 },
+  cancelButtonText: { color: '#334155', fontSize: 15, fontWeight: '700' },
+  continueButton: { flex: 1, minHeight: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 11, backgroundColor: '#1f3f66' },
+  continueButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
 });

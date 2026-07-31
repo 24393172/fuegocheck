@@ -225,7 +225,7 @@ export class LocalServerApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code: 'CONFIGURATION' | 'NETWORK' | 'TIMEOUT' | 'VALIDATION' | 'SERVER'
+    public readonly code: 'AUTHENTICATION' | 'CONFIGURATION' | 'NETWORK' | 'TIMEOUT' | 'VALIDATION' | 'SERVER'
   ) {
     super(message);
     this.name = 'LocalServerApiError';
@@ -261,9 +261,9 @@ export function getLocalApiKey(): string {
   const configured = process.env.EXPO_PUBLIC_LOCAL_API_KEY?.trim();
   if (!configured) {
     throw new LocalServerApiError(
-      'El acceso al servidor local no está configurado en este dispositivo.',
+      'La clave API del servidor local no está configurada en esta app.',
       0,
-      'CONFIGURATION'
+      'AUTHENTICATION'
     );
   }
   return configured;
@@ -312,7 +312,11 @@ export async function requestLocalServer<T>(
           .filter(Boolean)
           .join(' — '),
         response.status,
-        response.status === 400 ? 'VALIDATION' : 'SERVER'
+        response.status === 401 || response.status === 403
+          ? 'AUTHENTICATION'
+          : response.status === 400 || response.status === 422
+            ? 'VALIDATION'
+            : 'SERVER'
       );
     }
     return body as T;
@@ -399,6 +403,41 @@ export async function checkServerHealth(): Promise<HealthResponse> {
     throw new LocalServerApiError('Unexpected health response', 0, 'SERVER');
   }
   return response;
+}
+
+export function localServerErrorAlert(error: unknown): { title: string; message: string } {
+  if (!(error instanceof LocalServerApiError)) {
+    return {
+      title: 'No se pudo sincronizar',
+      message: 'Ocurrió un error inesperado al actualizar el catálogo.',
+    };
+  }
+  if (error.code === 'AUTHENTICATION') {
+    return error.status === 401 || error.status === 403
+      ? {
+          title: 'Error de autenticación',
+          message: 'El servidor respondió, pero rechazó la clave API. Verifica que EXPO_PUBLIC_LOCAL_API_KEY coincida exactamente con LOCAL_API_KEY.',
+        }
+      : {
+          title: 'Error de autenticación',
+          message: 'La app no tiene configurada EXPO_PUBLIC_LOCAL_API_KEY. Agrégala en .env.local y reinicia Expo o recompila la app.',
+        };
+  }
+  if (error.code === 'NETWORK' || error.code === 'TIMEOUT') {
+    return {
+      title: 'Servidor no disponible',
+      message: 'No se pudo establecer comunicación con el servidor local. Puedes continuar usando el último catálogo guardado en el dispositivo.',
+    };
+  }
+  if (error.code === 'CONFIGURATION') {
+    return { title: 'Configuración incompleta', message: error.message };
+  }
+  return {
+    title: 'No se pudo sincronizar',
+    message: error.code === 'SERVER'
+      ? 'El servidor respondió, pero ocurrió un error al procesar la solicitud.'
+      : error.message,
+  };
 }
 
 function diagnosticHttpResult(status: number): LocalServerDiagnosticCheck {

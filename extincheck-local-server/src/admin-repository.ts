@@ -16,7 +16,7 @@ export class AdminRepository {
   constructor(public readonly filePath: string) {
     this.database = new DatabaseSync(filePath);
     configureSqlite(this.database);
-    const initialSchemaVersion = requireSupportedSchema(this.database);
+    requireSupportedSchema(this.database);
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS companies (
         id TEXT PRIMARY KEY,
@@ -54,6 +54,9 @@ export class AdminRepository {
         area TEXT NOT NULL DEFAULT '',
         floor TEXT NOT NULL DEFAULT '',
         reference TEXT NOT NULL DEFAULT '',
+        identifier TEXT NOT NULL DEFAULT '',
+        extinguisher_type TEXT NOT NULL DEFAULT '',
+        capacity TEXT NOT NULL DEFAULT '',
         active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -81,11 +84,27 @@ export class AdminRepository {
       CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
       ON admin_sessions(expires_at, revoked_at);
     `);
-    if (initialSchemaVersion === 0) {
-      applyOrderedMigrations(this.database, [
-        { version: 1, name: 'baseline-admin-schema', up: () => undefined },
-      ]);
-    }
+    applyOrderedMigrations(this.database, [
+      { version: 1, name: 'baseline-admin-schema', up: () => undefined },
+      { version: 2, name: 'portable-storage-paths', up: () => undefined },
+      {
+        version: 3,
+        name: 'configured-extinguisher-identity',
+        up: () => {
+          const columns = new Set(
+            (this.database.prepare('PRAGMA table_info(equipment_locations)').all() as Array<{ name: string }>)
+              .map((column) => column.name)
+          );
+          for (const column of ['identifier', 'extinguisher_type', 'capacity']) {
+            if (!columns.has(column)) {
+              this.database.exec(
+                `ALTER TABLE equipment_locations ADD COLUMN ${column} TEXT NOT NULL DEFAULT '';`
+              );
+            }
+          }
+        },
+      },
+    ]);
     const locationTable = this.database.prepare(
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'equipment_locations'`
     ).get() as { sql: string } | undefined;
@@ -105,11 +124,20 @@ export class AdminRepository {
             area TEXT NOT NULL DEFAULT '',
             floor TEXT NOT NULL DEFAULT '',
             reference TEXT NOT NULL DEFAULT '',
+            identifier TEXT NOT NULL DEFAULT '',
+            extinguisher_type TEXT NOT NULL DEFAULT '',
+            capacity TEXT NOT NULL DEFAULT '',
             active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
           );
-          INSERT INTO equipment_locations_v2 SELECT * FROM equipment_locations;
+          INSERT INTO equipment_locations_v2 (
+            id, company_id, branch_id, equipment_type, name, area, floor, reference,
+            identifier, extinguisher_type, capacity, active, created_at, updated_at
+          ) SELECT
+            id, company_id, branch_id, equipment_type, name, area, floor, reference,
+            identifier, extinguisher_type, capacity, active, created_at, updated_at
+          FROM equipment_locations;
           DROP TABLE equipment_locations;
           ALTER TABLE equipment_locations_v2 RENAME TO equipment_locations;
           CREATE INDEX idx_locations_company_type
@@ -267,47 +295,72 @@ export class AdminRepository {
       values.push(filters.active ? 1 : 0);
     }
     if (filters.search?.trim()) {
-      conditions.push(`lower(l.name || ' ' || l.area || ' ' || l.floor || ' ' || l.reference) LIKE ?`);
+      conditions.push(filters.equipmentType === 'extinguisher'
+        ? `lower(l.name || ' ' || l.identifier || ' ' || l.extinguisher_type || ' ' || l.capacity) LIKE ?`
+        : `lower(l.name || ' ' || l.area || ' ' || l.floor || ' ' || l.reference) LIKE ?`);
       values.push(`%${filters.search.trim().toLocaleLowerCase()}%`);
     }
     return this.database.prepare(`
       SELECT l.id, l.company_id AS companyId, l.branch_id AS branchId,
              l.equipment_type AS equipmentType, l.name, l.area, l.floor,
-             l.reference, l.active, l.created_at AS createdAt, l.updated_at AS updatedAt,
+             l.reference, l.identifier, l.extinguisher_type AS extinguisherType,
+             l.capacity, l.active, l.created_at AS createdAt, l.updated_at AS updatedAt,
              b.name AS branchName
       FROM equipment_locations l
       LEFT JOIN branches b ON b.id = l.branch_id
       WHERE ${conditions.join(' AND ')}
       ORDER BY l.active DESC, lower(l.name)
-    `).all(...values).map(booleanFields);
+    `).all(...values).map(locationFields);
   }
 
   createLocation(companyId: string, input: LocationInput) {
     this.requireCompany(companyId);
-    this.validateBranchForCompany(input.branchId, companyId);
+    const isExtinguisher = input.equipmentType === 'extinguisher';
+    const branchId = isExtinguisher ? null : input.branchId;
+    this.validateBranchForCompany(branchId, companyId);
     const now = new Date().toISOString();
     const id = randomUUID();
     this.database.prepare(`
       INSERT INTO equipment_locations (
         id, company_id, branch_id, equipment_type, name, area, floor,
-        reference, active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        reference, identifier, extinguisher_type, capacity, active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      id, companyId, input.branchId, input.equipmentType, input.name.trim(), input.area.trim(),
-      input.floor.trim(), input.reference.trim(), input.active ? 1 : 0, now, now
+      id, companyId, branchId, input.equipmentType, input.name.trim(),
+      isExtinguisher ? '' : input.area.trim(),
+      isExtinguisher ? '' : input.floor.trim(),
+      isExtinguisher ? '' : input.reference.trim(),
+      isExtinguisher ? input.identifier.trim() : '',
+      isExtinguisher ? input.extinguisherType.trim() : '',
+      isExtinguisher ? input.capacity.trim() : '',
+      input.active ? 1 : 0, now, now
     );
     return this.getLocation(id)!;
   }
 
   updateLocation(id: string, input: LocationInput) {
     const current = this.requireLocation(id);
+    const isExtinguisher = input.equipmentType === 'extinguisher';
+    if (isExtinguisher) {
+      this.database.prepare(`
+        UPDATE equipment_locations SET equipment_type = ?, name = ?, identifier = ?,
+          extinguisher_type = ?, capacity = ?, active = ?, updated_at = ? WHERE id = ?
+      `).run(
+        input.equipmentType, input.name.trim(), input.identifier.trim(),
+        input.extinguisherType.trim(), input.capacity.trim(), input.active ? 1 : 0,
+        new Date().toISOString(), id
+      );
+      return this.getLocation(id)!;
+    }
     this.validateBranchForCompany(input.branchId, current.companyId);
     this.database.prepare(`
       UPDATE equipment_locations SET branch_id = ?, equipment_type = ?, name = ?,
-        area = ?, floor = ?, reference = ?, active = ?, updated_at = ? WHERE id = ?
+        area = ?, floor = ?, reference = ?, identifier = ?, extinguisher_type = ?,
+        capacity = ?, active = ?, updated_at = ? WHERE id = ?
     `).run(
-      input.branchId, input.equipmentType, input.name.trim(), input.area.trim(), input.floor.trim(),
-      input.reference.trim(), input.active ? 1 : 0, new Date().toISOString(), id
+      input.branchId, input.equipmentType, input.name.trim(), input.area.trim(),
+      input.floor.trim(), input.reference.trim(), '', '', '',
+      input.active ? 1 : 0, new Date().toISOString(), id
     );
     return this.getLocation(id)!;
   }
@@ -329,7 +382,9 @@ export class AdminRepository {
         businessName: company.businessName,
         branches: branches.map(compactBranch),
         locations: this.listLocations(company.id, { active: true })
-          .filter((location) => location.branchId === null || activeBranchIds.has(location.branchId))
+          .filter((location) => location.equipmentType === 'extinguisher'
+            || location.branchId === null
+            || activeBranchIds.has(location.branchId))
           .map(compactLocation),
       };
     });
@@ -363,9 +418,9 @@ export class AdminRepository {
     const existing = this.listLocations(companyId);
     for (const [equipmentType, name] of examples) {
       if (!existing.some((location) => location.equipmentType === equipmentType && normalize(location.name) === normalize(name))) {
-        this.createLocation(companyId, {
-          branchId: null, equipmentType, name, area: '', floor: '', reference: '', active: true,
-        });
+        this.createLocation(companyId, equipmentType === 'extinguisher'
+          ? { equipmentType, name, identifier: '', extinguisherType: '', capacity: '', active: true }
+          : { branchId: null, equipmentType, name, area: '', floor: '', reference: '', active: true });
       }
     }
     return { company: this.getCompany(companyId), locations: this.listLocations(companyId) };
@@ -447,11 +502,12 @@ export class AdminRepository {
     const row = this.database.prepare(`
       SELECT l.id, l.company_id AS companyId, l.branch_id AS branchId,
              l.equipment_type AS equipmentType, l.name, l.area, l.floor,
-             l.reference, l.active, l.created_at AS createdAt, l.updated_at AS updatedAt,
+              l.reference, l.identifier, l.extinguisher_type AS extinguisherType,
+              l.capacity, l.active, l.created_at AS createdAt, l.updated_at AS updatedAt,
              b.name AS branchName
       FROM equipment_locations l LEFT JOIN branches b ON b.id = l.branch_id WHERE l.id = ?
     `).get(id);
-    return row ? booleanFields(row) : undefined;
+    return row ? locationFields(row) : undefined;
   }
 
   private findCompanyByName(name: string): any | undefined {
@@ -517,6 +573,28 @@ function booleanFields(row: any) {
   return { ...row, active: Boolean(row.active) };
 }
 
+function locationFields(row: any) {
+  const location = booleanFields(row);
+  if (location.equipmentType === 'extinguisher') {
+    const {
+      branchId: _branchId,
+      branchName: _branchName,
+      area: _area,
+      floor: _floor,
+      reference: _reference,
+      ...extinguisher
+    } = location;
+    return extinguisher;
+  }
+  const {
+    identifier: _identifier,
+    extinguisherType: _extinguisherType,
+    capacity: _capacity,
+    ...standard
+  } = location;
+  return standard;
+}
+
 function cleanName(value: string) {
   return value.trim().replace(/\s+/g, ' ');
 }
@@ -530,6 +608,16 @@ function compactBranch(branch: any) {
 }
 
 function compactLocation(location: any) {
+  if (location.equipmentType === 'extinguisher') {
+    return {
+      id: location.id,
+      equipmentType: location.equipmentType,
+      name: location.name,
+      identifier: location.identifier,
+      extinguisherType: location.extinguisherType,
+      capacity: location.capacity,
+    };
+  }
   return {
     id: location.id,
     equipmentType: location.equipmentType,

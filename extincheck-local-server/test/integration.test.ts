@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import { AdminRepository } from '../src/admin-repository.js';
@@ -584,7 +585,14 @@ test('admin catalog persists companies, branches and filtered equipment location
     const response = await fetch(`${baseUrl}/api/companies/${firstCompany.company.id}/locations`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(equipmentType === 'extinguisher' ? {
+        equipmentType,
+        name,
+        identifier: 'EXT-01',
+        extinguisherType: 'PQS',
+        capacity: '6 kg',
+        active: true,
+      } : {
         branchId: branch.branch.id,
         equipmentType,
         name,
@@ -597,16 +605,83 @@ test('admin catalog persists companies, branches and filtered equipment location
     assert.equal(response.status, 201);
     return (await response.json() as { location: { id: string } }).location;
   };
+  const obsoleteExtinguisherFields = await fetch(`${baseUrl}/api/companies/${firstCompany.company.id}/locations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      equipmentType: 'extinguisher',
+      name: 'Intento inválido',
+      identifier: 'EXT-X',
+      extinguisherType: 'PQS',
+      capacity: '6 kg',
+      area: 'Campo obsoleto',
+      active: true,
+    }),
+  });
+  assert.equal(obsoleteExtinguisherFields.status, 400);
+
   const extinguisherLocation = await createLocation('extinguisher', 'Acceso principal');
+  const legacyDatabase = new DatabaseSync(databasePath);
+  legacyDatabase.prepare(`
+    UPDATE equipment_locations
+    SET branch_id = ?, area = ?, floor = ?, reference = ?
+    WHERE id = ?
+  `).run(branch.branch.id, 'Área histórica', 'Piso histórico', 'Referencia histórica', extinguisherLocation.id);
+  const editExtinguisher = await fetch(`${baseUrl}/api/locations/${extinguisherLocation.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      equipmentType: 'extinguisher',
+      name: 'Acceso principal editado',
+      identifier: 'EXT-01',
+      extinguisherType: 'PQS',
+      capacity: '6 kg',
+      active: true,
+    }),
+  });
+  assert.equal(editExtinguisher.status, 200);
+  const preservedLegacy = legacyDatabase.prepare(`
+    SELECT branch_id AS branchId, area, floor, reference
+    FROM equipment_locations WHERE id = ?
+  `).get(extinguisherLocation.id) as { branchId: string; area: string; floor: string; reference: string };
+  legacyDatabase.close();
+  assert.deepEqual({ ...preservedLegacy }, {
+    branchId: branch.branch.id,
+    area: 'Área histórica',
+    floor: 'Piso histórico',
+    reference: 'Referencia histórica',
+  });
   await createLocation('hydrant', 'Patio de maniobras');
   await createLocation('addressed_device', 'Pasillo principal');
   await createLocation('conventional_device', 'Cuarto de máquinas');
   await createLocation('notification_device', 'Vestíbulo');
 
   const filtered = await fetch(`${baseUrl}/api/companies/${firstCompany.company.id}/locations?equipmentType=extinguisher`);
-  const filteredBody = await filtered.json() as { locations: Array<{ equipmentType: string }> };
+  const filteredBody = await filtered.json() as { locations: Array<Record<string, unknown>> };
   assert.equal(filteredBody.locations.length, 1);
   assert.equal(filteredBody.locations[0].equipmentType, 'extinguisher');
+  assert.equal(filteredBody.locations[0].identifier, 'EXT-01');
+  assert.equal(filteredBody.locations[0].extinguisherType, 'PQS');
+  assert.equal(filteredBody.locations[0].capacity, '6 kg');
+  assert.equal('branchId' in filteredBody.locations[0], false);
+  assert.equal('area' in filteredBody.locations[0], false);
+  assert.equal('floor' in filteredBody.locations[0], false);
+  assert.equal('reference' in filteredBody.locations[0], false);
+
+  const mobileCatalog = await (await fetch(`${baseUrl}/api/mobile/catalog`)).json() as {
+    companies: Array<{ locations: Array<Record<string, unknown>> }>;
+  };
+  const mobileExtinguisher = mobileCatalog.companies[0].locations.find(
+    (location) => location.id === extinguisherLocation.id
+  );
+  assert.equal(mobileExtinguisher?.id, extinguisherLocation.id);
+  assert.equal(mobileExtinguisher?.identifier, 'EXT-01');
+  assert.equal(mobileExtinguisher?.extinguisherType, 'PQS');
+  assert.equal(mobileExtinguisher?.capacity, '6 kg');
+  assert.equal('branchId' in mobileExtinguisher!, false);
+  assert.equal('area' in mobileExtinguisher!, false);
+  assert.equal('floor' in mobileExtinguisher!, false);
+  assert.equal('reference' in mobileExtinguisher!, false);
 
   await fetch(`${baseUrl}/api/locations/${extinguisherLocation.id}/status`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active: false }),
@@ -621,8 +696,8 @@ test('admin catalog persists companies, branches and filtered equipment location
   await fetch(`${baseUrl}/api/branches/${branch.branch.id}/status`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active: false }),
   });
-  const catalogWithoutInactiveBranch = await (await fetch(`${baseUrl}/api/mobile/catalog`)).json() as { companies: Array<{ locations: unknown[] }> };
-  assert.equal(catalogWithoutInactiveBranch.companies[0].locations.length, 0);
+  const catalogWithoutInactiveBranch = await (await fetch(`${baseUrl}/api/mobile/catalog`)).json() as { companies: Array<{ locations: Array<{ id: string }> }> };
+  assert.deepEqual(catalogWithoutInactiveBranch.companies[0].locations.map((location) => location.id), [extinguisherLocation.id]);
 
   const reopened = new AdminRepository(databasePath);
   assert.equal(reopened.listCompanies({ search: 'caribe' }).length, 1);

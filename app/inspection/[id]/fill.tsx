@@ -34,7 +34,7 @@ import { useInspectionStore } from '../../../store/inspection.store';
 import FormField from '../../../components/forms/FormField';
 import PhotoField from '../../../components/forms/PhotoField';
 import SectionHeader from '../../../components/ui/SectionHeader';
-import { CatalogLocation } from '../../../types/catalog.types';
+import { CatalogStandardLocation } from '../../../types/catalog.types';
 import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
 import { AnsulData } from '../../../types/ansul.types';
 import {
@@ -82,7 +82,7 @@ export default function FillScreen() {
   const [isLoading, setIsLoading] = useState(true);
   const [photosByKey, setPhotosByKey] = useState<Record<string, Photo>>({});
   const [isReadOnly, setIsReadOnly] = useState(readonly === '1');
-  const [catalogLocations, setCatalogLocations] = useState<CatalogLocation[]>([]);
+  const [catalogLocations, setCatalogLocations] = useState<CatalogStandardLocation[]>([]);
   const [locationSearch, setLocationSearch] = useState('');
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

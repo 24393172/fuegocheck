@@ -25,7 +25,7 @@ import { getInspection, updateInspection } from '../../../lib/repositories/inspe
 import { generateId } from '../../../lib/uuid';
 import { INSPECTION_SCHEMAS } from '../../../schemas';
 import { HydrantRecord } from '../../../types/hydrant.types';
-import { CatalogLocation } from '../../../types/catalog.types';
+import { CatalogStandardLocation } from '../../../types/catalog.types';
 import { getLocationsByBranch, getLocationsByCompany } from '../../../services/catalog-sync';
 import EquipmentEvidenceField from '../../../components/forms/EquipmentEvidenceField';
 
@@ -43,7 +43,7 @@ export default function HydrantEditorScreen() {
   const [isReadOnly, setIsReadOnly] = useState(readonly === '1');
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [locations, setLocations] = useState<CatalogLocation[]>([]);
+  const [locations, setLocations] = useState<CatalogStandardLocation[]>([]);
   const [locationSearch, setLocationSearch] = useState('');
   const loadedRef = useRef(false);
   const createdAtRef = useRef(Date.now());
@@ -229,7 +229,7 @@ export default function HydrantEditorScreen() {
 
   const complete = isHydrantComplete(watchedValues);
 
-  function selectCatalogLocation(location: CatalogLocation) {
+  function selectCatalogLocation(location: CatalogStandardLocation) {
     setValue('locationId', location.id, { shouldDirty: true });
     setValue('locationNameSnapshot', location.name, { shouldDirty: true });
     setValue('ubicacion', location.name, { shouldDirty: true });

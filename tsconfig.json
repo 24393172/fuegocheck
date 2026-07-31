@@ -3,5 +3,5 @@
   "compilerOptions": {
     "strict": true
   },
-  "exclude": ["extincheck-local-server"]
+  "exclude": ["extincheck-local-server", "backups"]
 }

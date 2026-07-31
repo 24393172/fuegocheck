@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 export function configureSqlite(database: DatabaseSync): void {
   database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL;');

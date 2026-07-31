@@ -33,13 +33,13 @@ import {
   AlarmMobileFormId,
   AlarmServerFormType,
 } from '../../../types/alarm.types';
-import { CatalogEquipmentType, CatalogLocation } from '../../../types/catalog.types';
+import { CatalogEquipmentType, CatalogStandardLocation } from '../../../types/catalog.types';
 
 type DeviceMobileId = Exclude<AlarmMobileFormId, 'tablero_ad'>;
 
 const FORM_CONFIG: Record<DeviceMobileId, {
   identifierLabel: string;
-  equipmentType: CatalogEquipmentType;
+  equipmentType: Exclude<CatalogEquipmentType, 'extinguisher' | 'hydrant'>;
   serverFormType: Exclude<AlarmServerFormType, 'alarm_panel'>;
 }> = {
   dispositivos_ad: {
@@ -78,7 +78,7 @@ export default function AlarmDeviceEditorScreen() {
   const [readOnly, setReadOnly] = useState(readonly === '1');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [locations, setLocations] = useState<CatalogLocation[]>([]);
+  const [locations, setLocations] = useState<CatalogStandardLocation[]>([]);
   const [locationSearch, setLocationSearch] = useState('');
   const loadedRef = useRef(false);
   const readOnlyRef = useRef(readonly === '1');

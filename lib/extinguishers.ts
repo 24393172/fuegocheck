@@ -1,7 +1,63 @@
-import { ExtinguisherCheckValue, ExtinguisherCollection, ExtinguisherRecord } from '../types/extinguisher.types';
+import { CatalogExtinguisherLocation } from '../types/catalog.types';
+import {
+  ConfiguredExtinguisher,
+  ExtinguisherCheckValue,
+  ExtinguisherCollection,
+  ExtinguisherRecord,
+} from '../types/extinguisher.types';
 import { generateId } from './uuid';
 
 export const MAX_EXTINGUISHERS = 115;
+
+export function configuredExtinguisher(location: CatalogExtinguisherLocation): ConfiguredExtinguisher {
+  return {
+    id: location.id,
+    numero: location.identifier,
+    ubicacion: location.name,
+    tipo_extintor: location.extinguisherType,
+    capacidad: location.capacity,
+  };
+}
+
+export function createConfiguredExtinguisher(
+  equipment: ConfiguredExtinguisher,
+  existing?: ExtinguisherRecord,
+  now = Date.now()
+): ExtinguisherRecord {
+  const createdAt = existing?.createdAt ?? now;
+  return {
+    ...createEmptyExtinguisher(equipment.id, createdAt),
+    ...existing,
+    id: equipment.id,
+    numero: equipment.numero,
+    ubicacion: equipment.ubicacion,
+    locationId: equipment.id,
+    locationNameSnapshot: equipment.ubicacion,
+    customLocation: false,
+    tipo_extintor: equipment.tipo_extintor,
+    capacidad: equipment.capacidad,
+    createdAt,
+    updatedAt: now,
+  };
+}
+
+export function capturedConfiguredIds(items: ExtinguisherRecord[]): Set<string> {
+  return new Set(items.flatMap((item) => [item.id, item.locationId].filter(Boolean) as string[]));
+}
+
+export function configuredExtinguisherProgress(
+  configured: CatalogExtinguisherLocation[],
+  items: ExtinguisherRecord[]
+) {
+  const capturedIds = capturedConfiguredIds(items);
+  const available = configured.filter((item) => !capturedIds.has(item.id));
+  return {
+    inspected: configured.length - available.length,
+    total: configured.length,
+    available,
+    capturedIds,
+  };
+}
 
 const DATA_KEYS = [
   'numero',
@@ -34,6 +90,19 @@ const CHECK_KEYS = [
   'manguera',
   'difusor',
   'senalamiento',
+] as const;
+
+const INSPECTION_DATA_KEYS = [
+  'proxima_recarga',
+  ...CHECK_KEYS,
+  'presion_comentario',
+  'altura_comentario',
+  'seguro_comentario',
+  'pintura_comentario',
+  'manguera_comentario',
+  'difusor_comentario',
+  'senalamiento_comentario',
+  'observaciones',
 ] as const;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -132,6 +201,12 @@ export function readExtinguisherItems(value: unknown): Array<Record<string, unkn
 
 export function hasAnyExtinguisherData(value: unknown): boolean {
   return isObject(value) && hasRecordData(value);
+}
+
+export function hasAnyExtinguisherInspectionData(value: unknown): boolean {
+  return isObject(value) && INSPECTION_DATA_KEYS.some(
+    (key) => text(value[key]).trim().length > 0
+  );
 }
 
 export function isExtinguisherComplete(value: unknown): boolean {
