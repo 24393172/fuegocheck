@@ -42,22 +42,15 @@ const VALID_SCHEMA_IDS = new Set(INSPECTION_SCHEMAS.map((schema) => schema.id));
 const PUMP_SCHEMA_IDS = PUMP_SCHEMAS.map((schema) => schema.id);
 
 // Legacy site inspections did not store selectedFormatIds because they always
-// contained the three pump forms. Any pump member is normalized to the complete
-// group so Bombas remains an atomic option.
+// contained the three pump forms. Explicit arrays are preserved so new
+// inspections can select any subset of the existing pump schemas.
 export function normalizeSelectedFormatIds(value: unknown): string[] {
-  const raw = Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === 'string' && VALID_SCHEMA_IDS.has(item))
-    : [];
-
-  if (raw.length === 0) return [...PUMP_SCHEMA_IDS];
+  if (!Array.isArray(value)) return [...PUMP_SCHEMA_IDS];
+  const raw = value.filter(
+    (item): item is string => typeof item === 'string' && VALID_SCHEMA_IDS.has(item)
+  );
 
   const unique = [...new Set(raw)];
-  if (unique.some((id) => PUMP_SCHEMA_IDS.includes(id))) {
-    unique.splice(0, unique.length, ...[
-      ...PUMP_SCHEMA_IDS,
-      ...unique.filter((id) => !PUMP_SCHEMA_IDS.includes(id)),
-    ]);
-  }
   if (unique.some((id) => ALARM_MOBILE_IDS.includes(id as typeof ALARM_MOBILE_IDS[number]))) {
     return [
       ...unique.filter((id) => !ALARM_MOBILE_IDS.includes(id as typeof ALARM_MOBILE_IDS[number])),

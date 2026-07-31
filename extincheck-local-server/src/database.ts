@@ -508,9 +508,13 @@ export class LocalDatabase {
     if (!selectedIds.includes('hidrantes')) {
       this.database.prepare('DELETE FROM hydrants WHERE inspection_id = ?').run(inspectionId);
     }
-    if (!FIRE_PUMP_MOBILE_IDS.some((id) => selectedIds.includes(id))) {
+    const unselectedPumpTypes = Object.entries(FIRE_PUMP_CONFIG)
+      .filter(([, config]) => !selectedIds.includes(config.mobileId))
+      .map(([formType]) => formType);
+    if (unselectedPumpTypes.length) {
       this.database.prepare(`DELETE FROM inspection_forms WHERE inspection_id = ?
-        AND form_type IN ('pump_jockey', 'pump_electric', 'pump_diesel')`).run(inspectionId);
+        AND form_type IN (${unselectedPumpTypes.map(() => '?').join(', ')})`)
+        .run(inspectionId, ...unselectedPumpTypes);
     }
     if (!ALARM_MOBILE_IDS.some((id) => selectedIds.includes(id))) {
       this.database.prepare(`DELETE FROM inspection_forms WHERE inspection_id = ?

@@ -116,9 +116,11 @@ plantillas ni respaldos terminados.
 ## Inicio automático en Windows
 
 Se eligió el Programador de tareas porque está incluido en Windows, puede
-ejecutar al arrancar sin una sesión interactiva y permite reinicios. PM2 requiere
-un componente global adicional y su integración con el arranque de Windows no es
-tan directa. Los scripts no se instalan automáticamente.
+ejecutar al arrancar sin una sesión interactiva y permite reinicios. La tarea usa
+la ruta absoluta de Node.js y la política `IgnoreNew`; además, el servidor conserva
+su bloqueo de proceso, por lo que un segundo inicio no crea otra instancia. PM2
+requiere un componente global adicional y su integración con Windows no es tan
+directa. La instalación se realiza una sola vez con permisos de administrador.
 
 Después de compilar, abra PowerShell como administrador:
 
@@ -146,7 +148,10 @@ Compruebe la IP con `Get-NetIPAddress -AddressFamily IPv4` y configure la app co
 solo el perfil privado y la subred local, revise y ejecute como administrador:
 
 ```powershell
-.\scripts\windows\New-ExtinCheckFirewallRule.ps1 -Port 3001 -RemoteAddress LocalSubnet
+Get-NetConnectionProfile
+# Si la red de oficina aparece como Public, cámbiela a Private antes de continuar:
+Set-NetConnectionProfile -InterfaceAlias 'Wi-Fi' -NetworkCategory Private
+.\scripts\windows\New-ExtinCheckFirewallRule.ps1 -Port 3001 -RemoteAddress LocalSubnet -ConfirmInstall
 ```
 
 No exponga el puerto a Internet ni use `Any` como origen sin una evaluación

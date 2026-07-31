@@ -901,16 +901,44 @@ test('Bombas synchronizes atomically, is idempotent and fills the three official
   assert.equal(regeneratedBook.getWorksheet('B Jockey')?.getCell('U17').value, 'X');
 });
 
-test('Bombas rejects incomplete groups, duplicate questionIds and invalid answers without saving', async (context) => {
+test('Bombas accepts one or two selected pumps and leaves other report sheets empty', async (context) => {
+  const { database, reportService, baseUrl } = await testServer(context);
+  for (const count of [1, 2]) {
+    const body = firePumpsPayload(`inspection-pumps-${count}`);
+    const selectedTypes = FIRE_PUMP_FORM_TYPES.slice(0, count);
+    body.selectedFormatIds = selectedTypes.map((formType) => FIRE_PUMP_CONFIG[formType].mobileId);
+    body.firePumps = body.firePumps.filter((form) => selectedTypes.includes(form.formType));
+
+    const response = await fetch(`${baseUrl}/api/inspections/sync`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 201);
+    const responseBody = await response.json() as { firePumpFormsReceived: number; report: { id: string } };
+    assert.equal(responseBody.firePumpFormsReceived, count);
+    assert.equal(database.getInspectionReportData(body.inspectionId)?.firePumps.length, count);
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(reportService.resolveDownload(responseBody.report.id)!.filePath);
+    for (const formType of FIRE_PUMP_FORM_TYPES) {
+      const config = FIRE_PUMP_CONFIG[formType];
+      assert.equal(
+        workbook.getWorksheet(config.sheetName)?.getCell(config.generalCells.cliente).value ?? null,
+        selectedTypes.includes(formType) ? body.company.name : null
+      );
+    }
+  }
+});
+
+test('Bombas rejects mismatched forms, duplicate questionIds and invalid answers without saving', async (context) => {
   const { database, baseUrl } = await testServer(context);
-  const incomplete = firePumpsPayload('inspection-pumps-incomplete');
-  incomplete.selectedFormatIds = ['jockey'];
-  incomplete.firePumps = [incomplete.firePumps[0]];
-  const incompleteResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(incomplete),
+  const mismatched = firePumpsPayload('inspection-pumps-mismatched');
+  mismatched.selectedFormatIds = ['jockey'];
+  mismatched.firePumps = [mismatched.firePumps[1]];
+  const mismatchedResponse = await fetch(`${baseUrl}/api/inspections/sync`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(mismatched),
   });
-  assert.equal(incompleteResponse.status, 400);
-  assert.equal(database.inspectionCount(incomplete.inspectionId), 0);
+  assert.equal(mismatchedResponse.status, 400);
+  assert.equal(database.inspectionCount(mismatched.inspectionId), 0);
 
   const duplicate = firePumpsPayload('inspection-pumps-duplicate');
   duplicate.firePumps[0].answers.push({ ...duplicate.firePumps[0].answers[0] });

@@ -215,14 +215,8 @@ export async function setInspectionPinned(id: string, pinned: boolean): Promise<
   if (result.changes !== 1) throw new Error('EDITABLE_INSPECTION_NOT_FOUND');
 }
 
-export async function deleteInspection(id: string): Promise<void> {
-  const db = getDatabase();
-  await db.runAsync('DELETE FROM inspections WHERE id = ?', [id]);
-}
-
 // Deletes an inspection and everything attached to it: photo rows, signature
-// rows, the inspection row, and the physical photo files on disk. Use this
-// instead of deleteInspection() to avoid orphaned rows and leftover files.
+// rows, the inspection row, and the physical photo files on disk.
 export async function deleteInspectionCompletely(
   id: string,
   requiredStatus?: InspectionStatus

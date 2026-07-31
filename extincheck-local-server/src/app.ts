@@ -16,6 +16,7 @@ import { evidenceFinalizeSchema, evidenceMetadataSchema, extinguisherInspectionS
 import { OperationalService } from './operations.js';
 import { requestLogging } from './logger.js';
 import { SERVER_VERSION } from './version.js';
+import { FIRE_PUMP_CONFIG } from './fire-pump-config.js';
 
 let syncQueue: Promise<void> = Promise.resolve();
 function serializeSync<T>(operation: () => Promise<T>): Promise<T> {
@@ -480,7 +481,11 @@ export function createApp(
       const reportData = database.getInspectionReportData(inspectionId);
       if (!reportData) { response.status(404).json({ ok: false, message: 'Inspection not found' }); return; }
       const evidenceFormatSelected = metadata.formatType === 'fire_pumps'
-        ? ['jockey', 'electrica', 'diesel'].every((id) => reportData.inspection.selectedFormatIds.includes(id))
+        ? Boolean(metadata.formType
+          && metadata.formType in FIRE_PUMP_CONFIG
+          && reportData.inspection.selectedFormatIds.includes(
+            FIRE_PUMP_CONFIG[metadata.formType as keyof typeof FIRE_PUMP_CONFIG].mobileId
+          ))
         : metadata.formatType === 'alarms'
           ? ['tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion']
             .every((id) => reportData.inspection.selectedFormatIds.includes(id))

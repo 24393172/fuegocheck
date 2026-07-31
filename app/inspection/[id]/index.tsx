@@ -29,7 +29,7 @@ import { deletePhotoFiles } from '../../../lib/photo-manager';
 import { PUMP_SCHEMAS, ansulR102Form, tableroAdForm } from '../../../schemas';
 import { FormSchema } from '../../../types/form.types';
 import { Inspection, Signature } from '../../../types/inspection.types';
-import { FirePumpsData } from '../../../types/fire-pump.types';
+import { FirePumpFormId, FirePumpsData } from '../../../types/fire-pump.types';
 import { AlarmsData, AlarmMobileFormId } from '../../../types/alarm.types';
 import { AnsulData } from '../../../types/ansul.types';
 import {
@@ -450,7 +450,12 @@ export default function InspectionIndexScreen() {
         hydrants: selectedIds.includes('hidrantes')
           ? normalizeHydrantsData(currentPumps.hidrantes).collection.items : undefined,
         firePumps: PUMP_SCHEMAS.some((schema) => selectedIds.includes(schema.id))
-          ? firePumpPayloadForms(normalizeFirePumpsData(fullData).data)
+          ? firePumpPayloadForms(
+            normalizeFirePumpsData(fullData).data,
+            selectedIds.filter((formatId): formatId is FirePumpFormId =>
+              PUMP_SCHEMAS.some((schema) => schema.id === formatId)
+            )
+          )
           : undefined,
         alarms: ALARM_MOBILE_IDS.some((formId) => selectedIds.includes(formId))
           ? alarmPayload(normalizeAlarmsData(fullData, tableroAdForm).data)

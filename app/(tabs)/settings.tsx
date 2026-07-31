@@ -15,6 +15,10 @@ import { generateMasterExcel } from '../../lib/excel-generator';
 import { APP_VERSION } from '../../constants/config';
 import { getCatalogStatus, syncCatalog } from '../../services/catalog-sync';
 import { CatalogStatus } from '../../types/catalog.types';
+import {
+  LocalServerDiagnostics,
+  runLocalServerDiagnostics,
+} from '../../services/local-server-api';
 
 // Simple format check — good enough to catch typos before the composer opens.
 function isValidEmail(email: string): boolean {
@@ -29,6 +33,8 @@ export default function SettingsScreen() {
   const [isExporting, setIsExporting] = useState(false);
   const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
   const [catalogStatus, setCatalogStatus] = useState<CatalogStatus | null>(null);
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<LocalServerDiagnostics | null>(null);
 
   useEffect(() => {
     loadSettings()
@@ -60,6 +66,16 @@ export default function SettingsScreen() {
       );
     } finally {
       setIsSyncingCatalog(false);
+    }
+  }
+
+  async function handleRunDiagnostics() {
+    if (isRunningDiagnostics) return;
+    setIsRunningDiagnostics(true);
+    try {
+      setDiagnostics(await runLocalServerDiagnostics());
+    } finally {
+      setIsRunningDiagnostics(false);
     }
   }
 
@@ -215,6 +231,60 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      <Text style={styles.sectionTitle}>Conexión local</Text>
+      <View style={styles.card}>
+        <Text style={styles.label}>Diagnóstico del servidor</Text>
+        <Text style={styles.hint}>
+          Comprueba la conexión sin guardar el catálogo ni mostrar la clave API.
+        </Text>
+        <View style={styles.diagnosticRow}>
+          <Text style={styles.infoLabel}>URL del servidor</Text>
+          <Text style={[styles.infoValue, styles.serverValue]} numberOfLines={2}>
+            {diagnostics?.serverUrl ?? catalogStatus?.serverUrl ?? 'Ejecuta el diagnóstico'}
+          </Text>
+        </View>
+        <View style={styles.diagnosticRow}>
+          <Text style={styles.infoLabel}>Clave API configurada</Text>
+          <Text style={styles.infoValue}>
+            {diagnostics ? (diagnostics.apiKeyConfigured ? 'Sí' : 'No') : 'Sin comprobar'}
+          </Text>
+        </View>
+        <View style={styles.diagnosticResult}>
+          <Text style={styles.diagnosticLabel}>/api/health</Text>
+          <Text
+            style={[
+              styles.diagnosticDetail,
+              diagnostics && (diagnostics.health.ok ? styles.resultOk : styles.resultError),
+            ]}
+          >
+            {diagnostics?.health.detail ?? 'Sin comprobar'}
+          </Text>
+        </View>
+        <View style={styles.diagnosticResult}>
+          <Text style={styles.diagnosticLabel}>Catálogo autenticado</Text>
+          <Text
+            style={[
+              styles.diagnosticDetail,
+              diagnostics && (diagnostics.catalog.ok ? styles.resultOk : styles.resultError),
+            ]}
+          >
+            {diagnostics?.catalog.detail ?? 'Sin comprobar'}
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={[styles.saveButton, isRunningDiagnostics && styles.buttonDisabled]}
+          onPress={handleRunDiagnostics}
+          disabled={isRunningDiagnostics}
+          activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="Probar conexión con el servidor local"
+        >
+          <Text style={styles.saveButtonText}>
+            {isRunningDiagnostics ? 'Comprobando...' : 'Probar conexión'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       <Text style={styles.sectionTitle}>Exportar datos</Text>
       <View style={styles.card}>
         <Text style={styles.label}>Exportar todas las inspecciones</Text>
@@ -338,4 +408,31 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   serverValue: { flex: 1, marginLeft: 12, textAlign: 'right' },
+  diagnosticRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  diagnosticResult: {
+    paddingVertical: 6,
+    gap: 2,
+  },
+  diagnosticLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  diagnosticDetail: {
+    fontSize: 13,
+    color: '#6b7280',
+  },
+  resultOk: {
+    color: '#047857',
+  },
+  resultError: {
+    color: '#b91c1c',
+  },
 });

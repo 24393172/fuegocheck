@@ -21,8 +21,15 @@ import { normalizeFirePumpsData } from '../../lib/fire-pumps';
 import { ALARM_FORMAT_ID, normalizeAlarmsData } from '../../lib/alarms';
 import { ANSUL_FORMAT_ID, normalizeAnsulData } from '../../lib/ansul';
 import { ansulR102Form, tableroAdForm } from '../../schemas';
+import { FirePumpFormId } from '../../types/fire-pump.types';
 
 type Step = 'template' | 'client';
+
+const PUMP_OPTIONS: Array<{ id: FirePumpFormId; label: string }> = [
+  { id: 'jockey', label: 'Jockey' },
+  { id: 'electrica', label: 'Eléctrica' },
+  { id: 'diesel', label: 'Diésel' },
+];
 
 interface TemplateOption {
   id: string;
@@ -110,6 +117,9 @@ export default function NewInspectionScreen() {
   const [selectedCompanyId, setSelectedCompanyId] = useState('');
   const [selectedBranchId, setSelectedBranchId] = useState('');
   const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
+  const [selectedPumpIds, setSelectedPumpIds] = useState<FirePumpFormId[]>(
+    () => PUMP_OPTIONS.map((option) => option.id)
+  );
 
   const selectedTemplate = availableTemplates.find(
     (template) => template.id === selectedTemplateId
@@ -195,6 +205,10 @@ export default function NewInspectionScreen() {
   }
 
   async function handleCreate() {
+    if (selectedTemplateId === PUMPS_FORMAT_ID && selectedPumpIds.length === 0) {
+      Alert.alert('Selecciona una bomba', 'Elige al menos una bomba para iniciar la inspección.');
+      return;
+    }
     if (!selectedCompanyId) {
       Alert.alert('Selecciona una empresa', 'Elige una empresa antes de iniciar la inspección.');
       return;
@@ -234,13 +248,14 @@ export default function NewInspectionScreen() {
         pumps: {},
       };
 
-      // El grupo bombas conserva la lógica existente de abrir sus tres formularios.
       const selectedFormat = INSPECTION_FORMAT_OPTIONS.find(
         (option) => option.id === selectedTemplateId
       );
-      initialFormData.selectedFormatIds = selectedFormat
-        ? [...selectedFormat.schemaIds]
-        : [];
+      initialFormData.selectedFormatIds = selectedFormat?.id === PUMPS_FORMAT_ID
+        ? [...selectedPumpIds]
+        : selectedFormat
+          ? [...selectedFormat.schemaIds]
+          : [];
       if (selectedFormat?.id === PUMPS_FORMAT_ID) {
         initialFormData.firePumps = normalizeFirePumpsData(undefined).data;
       }
@@ -360,6 +375,42 @@ export default function NewInspectionScreen() {
           Captura los datos del sitio para iniciar la inspección.
         </Text>
       </View>
+
+      {selectedTemplateId === PUMPS_FORMAT_ID && (
+        <View style={styles.pumpSelector}>
+          <Text style={styles.label}>Bombas a inspeccionar</Text>
+          <Text style={styles.hint}>Selecciona una, dos o las tres bombas.</Text>
+          <View style={styles.pumpOptions}>
+            {PUMP_OPTIONS.map((option) => {
+              const selected = selectedPumpIds.includes(option.id);
+              return (
+                <TouchableOpacity
+                  key={option.id}
+                  style={[styles.pumpOption, selected && styles.pumpOptionSelected]}
+                  onPress={() => setSelectedPumpIds((current) => selected
+                    ? current.filter((id) => id !== option.id)
+                    : [...current, option.id])}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: selected }}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons
+                    name={selected ? 'checkbox' : 'square-outline'}
+                    size={22}
+                    color={selected ? '#2563eb' : '#94a3b8'}
+                  />
+                  <Text style={[styles.pumpOptionText, selected && styles.pumpOptionTextSelected]}>
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+          {selectedPumpIds.length === 0 && (
+            <Text style={styles.pumpSelectionError}>Selecciona al menos una bomba.</Text>
+          )}
+        </View>
+      )}
 
       {companies.length > 0 ? (
         <View style={styles.field}>
@@ -635,6 +686,30 @@ const styles = StyleSheet.create({
   field: {
     gap: 8,
   },
+  pumpSelector: {
+    gap: 8,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#dbeafe',
+    borderRadius: 12,
+    backgroundColor: '#eff6ff',
+  },
+  pumpOptions: { gap: 8 },
+  pumpOption: {
+    minHeight: 46,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: '#cbd5e1',
+    borderRadius: 10,
+    backgroundColor: '#ffffff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+  },
+  pumpOptionSelected: { borderColor: '#2563eb', backgroundColor: '#ffffff' },
+  pumpOptionText: { color: '#475569', fontSize: 14, fontWeight: '700' },
+  pumpOptionTextSelected: { color: '#1d4ed8' },
+  pumpSelectionError: { color: '#b91c1c', fontSize: 12, fontWeight: '700' },
   label: {
     fontSize: 14,
     color: '#374151',

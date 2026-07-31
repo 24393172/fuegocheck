@@ -12,4 +12,5 @@ $info = Get-ScheduledTaskInfo -TaskName $TaskName
   LastRunTime = $info.LastRunTime
   LastTaskResult = $info.LastTaskResult
   NextRunTime = $info.NextRunTime
+  MultipleInstances = $task.Settings.MultipleInstances
 } | Format-List

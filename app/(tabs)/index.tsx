@@ -241,7 +241,7 @@ export default function DashboardScreen() {
               Bombas
             </Text>
             <Text style={[styles.quickCardSubtitle, isCompact && styles.quickCardSubtitleCompact]}>
-              3 equipos
+              1, 2 o 3 equipos
             </Text>
           </TouchableOpacity>
 

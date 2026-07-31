@@ -36,6 +36,16 @@ yarn-error.*
 !.env.example
 .codex-tmp/
 
+# recoverable backups and local server runtime data
+/backups/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+**/data/.extincheck-server.lock
+**/generated-reports/
+**/data/signatures/
+**/data/evidence/
+
 # typescript
 *.tsbuildinfo
 

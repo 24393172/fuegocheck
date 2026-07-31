@@ -115,6 +115,32 @@ export interface HealthResponse {
   timestamp: string;
 }
 
+export type LocalServerDiagnosticKind =
+  | 'ok'
+  | 'configuration'
+  | 'network'
+  | 'timeout'
+  | 'http_401'
+  | 'http_403'
+  | 'http_422'
+  | 'http_500'
+  | 'http_other'
+  | 'invalid_response';
+
+export interface LocalServerDiagnosticCheck {
+  ok: boolean;
+  kind: LocalServerDiagnosticKind;
+  status: number | null;
+  detail: string;
+}
+
+export interface LocalServerDiagnostics {
+  serverUrl: string;
+  apiKeyConfigured: boolean;
+  health: LocalServerDiagnosticCheck;
+  catalog: LocalServerDiagnosticCheck;
+}
+
 export interface SyncResponse {
   ok: true;
   created: boolean;
@@ -243,6 +269,10 @@ export function getLocalApiKey(): string {
   return configured;
 }
 
+export function hasLocalApiKey(): boolean {
+  return Boolean(process.env.EXPO_PUBLIC_LOCAL_API_KEY?.trim());
+}
+
 function requestHeaders(initial: HeadersInit | undefined, authenticated: boolean) {
   const headers = new Headers(initial);
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
@@ -369,6 +399,131 @@ export async function checkServerHealth(): Promise<HealthResponse> {
     throw new LocalServerApiError('Unexpected health response', 0, 'SERVER');
   }
   return response;
+}
+
+function diagnosticHttpResult(status: number): LocalServerDiagnosticCheck {
+  const knownStatuses: Partial<Record<number, [LocalServerDiagnosticKind, string]>> = {
+    401: ['http_401', 'HTTP 401 · La clave no fue aceptada'],
+    403: ['http_403', 'HTTP 403 · Acceso prohibido'],
+    422: ['http_422', 'HTTP 422 · Solicitud rechazada por validación'],
+    500: ['http_500', 'HTTP 500 · Error interno del servidor'],
+  };
+  const known = knownStatuses[status];
+  if (known) {
+    return { ok: false, kind: known[0], status, detail: known[1] };
+  }
+  if (status >= 500) {
+    return {
+      ok: false,
+      kind: 'http_500',
+      status,
+      detail: `HTTP ${status} · Error del servidor`,
+    };
+  }
+  return {
+    ok: false,
+    kind: 'http_other',
+    status,
+    detail: `HTTP ${status} · Respuesta no satisfactoria`,
+  };
+}
+
+async function runDiagnosticRequest(
+  serverUrl: string,
+  path: string,
+  authenticated: boolean,
+  isExpectedBody: (body: unknown) => boolean
+): Promise<LocalServerDiagnosticCheck> {
+  if (authenticated && !hasLocalApiKey()) {
+    return {
+      ok: false,
+      kind: 'configuration',
+      status: null,
+      detail: 'Clave API no configurada',
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const headers = new Headers({ Accept: 'application/json' });
+    if (authenticated) {
+      headers.set('Authorization', `Bearer ${getLocalApiKey()}`);
+    }
+    const response = await fetch(`${serverUrl}${path}`, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) return diagnosticHttpResult(response.status);
+
+    const body = await response.json().catch(() => null) as unknown;
+    if (!isExpectedBody(body)) {
+      return {
+        ok: false,
+        kind: 'invalid_response',
+        status: response.status,
+        detail: `HTTP ${response.status} · Respuesta inesperada`,
+      };
+    }
+    return {
+      ok: true,
+      kind: 'ok',
+      status: response.status,
+      detail: `HTTP ${response.status} · Correcto`,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return {
+        ok: false,
+        kind: 'timeout',
+        status: null,
+        detail: 'Timeout · El servidor tardó demasiado',
+      };
+    }
+    return {
+      ok: false,
+      kind: 'network',
+      status: null,
+      detail: 'Error de red · No se pudo llegar al servidor',
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function runLocalServerDiagnostics(): Promise<LocalServerDiagnostics> {
+  const apiKeyConfigured = hasLocalApiKey();
+  let serverUrl: string;
+  try {
+    serverUrl = getLocalServerUrl();
+  } catch {
+    const configurationResult: LocalServerDiagnosticCheck = {
+      ok: false,
+      kind: 'configuration',
+      status: null,
+      detail: 'URL del servidor no configurada',
+    };
+    return {
+      serverUrl: 'No configurado',
+      apiKeyConfigured,
+      health: configurationResult,
+      catalog: configurationResult,
+    };
+  }
+
+  const [health, catalog] = await Promise.all([
+    runDiagnosticRequest(serverUrl, '/api/health', false, (body) => {
+      const value = body as Partial<HealthResponse> | null;
+      return value?.ok === true && value.service === 'ExtinCheck Local Server';
+    }),
+    runDiagnosticRequest(serverUrl, '/api/mobile/catalog', true, (body) => {
+      const value = body as { version?: unknown; companies?: unknown } | null;
+      return typeof value?.version === 'string' && Array.isArray(value.companies);
+    }),
+  ]);
+
+  return { serverUrl, apiKeyConfigured, health, catalog };
 }
 
 export function syncExtinguisherInspection(

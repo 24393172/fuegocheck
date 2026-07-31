@@ -258,14 +258,18 @@ export function firePumpProgress(schema: FormSchema, form: FirePumpFormData): {
   return { total, answered, hasAnyData, complete, status, missing };
 }
 
-export function firePumpPayloadForms(data: FirePumpsData): Array<{
+export function firePumpPayloadForms(
+  data: FirePumpsData,
+  selectedPumpIds: readonly FirePumpFormId[] = PUMP_IDS
+): Array<{
   formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel';
   status: FirePumpFormStatus;
   observations: string;
   updatedAt: number;
   answers: FirePumpAnswer[];
 }> {
-  return PUMP_IDS.map((id) => {
+  const selected = new Set(selectedPumpIds);
+  return PUMP_IDS.filter((id) => selected.has(id)).map((id) => {
     const form = data[id];
     const formType: 'pump_jockey' | 'pump_electric' | 'pump_diesel' =
       id === 'electrica' ? 'pump_electric' : id === 'jockey' ? 'pump_jockey' : 'pump_diesel';

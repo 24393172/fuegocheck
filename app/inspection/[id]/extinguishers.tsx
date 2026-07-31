@@ -68,9 +68,10 @@ export default function ExtinguishersScreen() {
   const locked = readonly === '1' || inspection?.status === 'completed' || inspection?.status === 'mail_composer_opened' || inspection?.status === 'sent';
 
   function openEditor(itemId: string) {
-    router.push(
-      `/inspection/${id}/extinguisher-editor?itemId=${itemId}${locked ? '&readonly=1' : ''}`
-    );
+    router.push({
+      pathname: '/inspection/[id]/extinguisher-editor',
+      params: { id, itemId, ...(locked ? { readonly: '1' } : {}) },
+    });
   }
 
   function addExtinguisher() {
@@ -204,7 +205,10 @@ export default function ExtinguishersScreen() {
             {!locked && (
               <TouchableOpacity
                 style={styles.deleteButton}
-                onPress={() => confirmDelete(item)}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  confirmDelete(item);
+                }}
                 accessibilityRole="button"
                 accessibilityLabel={`Eliminar extintor ${item.numero || 'sin número'}`}
                 hitSlop={8}

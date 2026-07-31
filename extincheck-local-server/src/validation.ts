@@ -508,22 +508,19 @@ export const inspectionSyncSchema = z.object({
     });
   }
   const selectedPumpIds = FIRE_PUMP_MOBILE_IDS.filter((formatId) => selected.has(formatId));
-  if (selectedPumpIds.length > 0 && selectedPumpIds.length !== FIRE_PUMP_MOBILE_IDS.length) {
-    context.addIssue({
-      code: 'custom',
-      path: ['selectedFormatIds'],
-      message: 'Bombas must include jockey, electrica and diesel',
-    });
-  }
-  if (selectedPumpIds.length === FIRE_PUMP_MOBILE_IDS.length) {
+  if (selectedPumpIds.length > 0) {
     const forms = payload.firePumps ?? [];
     const formTypes = new Set(forms.map((form) => form.formType));
-    if (forms.length !== FIRE_PUMP_FORM_TYPES.length
-        || FIRE_PUMP_FORM_TYPES.some((formType) => !formTypes.has(formType))) {
+    const expectedFormTypes = FIRE_PUMP_FORM_TYPES.filter((formType) =>
+      selected.has(FIRE_PUMP_CONFIG[formType].mobileId)
+    );
+    if (forms.length !== expectedFormTypes.length
+        || expectedFormTypes.some((formType) => !formTypes.has(formType))
+        || forms.some((form) => !expectedFormTypes.includes(form.formType))) {
       context.addIssue({
         code: 'custom',
         path: ['firePumps'],
-        message: 'Bombas requires one Jockey, Electric and Diesel form',
+        message: 'Pump forms must match the selected pumps',
       });
     }
   } else if (payload.firePumps !== undefined) {
@@ -552,7 +549,9 @@ export const inspectionSyncSchema = z.object({
   }
   payload.evidenceManifest?.forEach((evidence, index) => {
     const selectedEvidenceFormat = evidence.formatType === 'fire_pumps'
-      ? FIRE_PUMP_MOBILE_IDS.every((id) => selected.has(id))
+      ? Boolean(evidence.formType
+        && evidence.formType in FIRE_PUMP_CONFIG
+        && selected.has(FIRE_PUMP_CONFIG[evidence.formType as keyof typeof FIRE_PUMP_CONFIG].mobileId))
       : evidence.formatType === 'alarms'
         ? ALARM_MOBILE_IDS.every((id) => selected.has(id))
       : evidence.formatType === 'ansul'

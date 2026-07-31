@@ -540,8 +540,10 @@ export class ExtinguisherReportService {
     if (!data) throw new Error(`Inspection not found: ${inspectionId}`);
     const includesExtinguishers = data.inspection.selectedFormatIds.includes('extintores');
     const includesHydrants = data.inspection.selectedFormatIds.includes('hidrantes');
-    const includesFirePumps = ['jockey', 'electrica', 'diesel']
-      .every((id) => data.inspection.selectedFormatIds.includes(id));
+    const selectedFirePumpTypes = FIRE_PUMP_FORM_TYPES.filter((formType) =>
+      data.inspection.selectedFormatIds.includes(FIRE_PUMP_CONFIG[formType].mobileId)
+    );
+    const includesFirePumps = selectedFirePumpTypes.length > 0;
     const includesAlarms = [
       'tablero_ad', 'dispositivos_ad', 'dispositivos_convencionales', 'dispositivos_notificacion',
     ].every((id) => data.inspection.selectedFormatIds.includes(id));
@@ -639,7 +641,7 @@ export class ExtinguisherReportService {
       }
 
       if (includesFirePumps) {
-        for (const formType of FIRE_PUMP_FORM_TYPES) {
+        for (const formType of selectedFirePumpTypes) {
           const config = FIRE_PUMP_CONFIG[formType];
           const form = data.firePumps.find((item) => item.formType === formType);
           if (!form) throw new Error(`Missing fire pump form: ${formType}`);
